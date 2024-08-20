@@ -1,0 +1,7 @@
+[workspace]
+resolver = "2"
+members = ["fye_client"]
+
+[workspace.package]
+version = "0.1.0-wip"
+authors = ["David Wolff"]

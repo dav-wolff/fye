@@ -1,0 +1,9 @@
+[package]
+name = "fye_client"
+version.workspace = true
+authors.workspace = true
+edition = "2021"
+
+[[bin]]
+name = "fye"
+path = "src/main.rs"
