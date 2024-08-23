@@ -1,3 +1,6 @@
+#![forbid(unsafe_code)]
+#![deny(non_snake_case)]
+
 fn main() {
-	println!("Hi wolrd!");
+	fye_client::mount("mnt").unwrap();
 }

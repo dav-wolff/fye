@@ -7,3 +7,7 @@ edition = "2021"
 [[bin]]
 name = "fye"
 path = "src/main.rs"
+
+[dependencies]
+fuser = { version = "0.14.0", default-features = false }
+libc = "0.2.158"
