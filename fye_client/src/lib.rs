@@ -1,5 +1,6 @@
 #![forbid(unsafe_code)]
 #![deny(non_snake_case)]
+#![allow(unused)]
 
 use std::{io, path::Path};
 

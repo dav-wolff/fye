@@ -46,8 +46,6 @@
 			devShells.default = craneLib.devShell {
 				packages = with pkgs; [
 					rust-analyzer
-					pkg-config
-					fuse
 				];
 			};
 		}
