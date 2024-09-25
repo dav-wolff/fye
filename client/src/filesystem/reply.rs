@@ -1,6 +1,8 @@
-use std::time::Duration;
+use std::{future::Future, time::Duration};
 
 use fuser::{FileAttr, FileType, ReplyAttr, ReplyCreate, ReplyData, ReplyDirectory, ReplyEntry, ReplyWrite};
+
+use crate::maybe_async::MaybeAsync;
 
 #[derive(Debug)]
 pub enum Error {
@@ -11,6 +13,9 @@ pub enum Error {
 	FBig,
 	IlSeq,
 	NotSup,
+	TimedOut,
+	NoLink,
+	IO,
 }
 
 impl From<Error> for i32 {
@@ -26,18 +31,32 @@ impl From<Error> for i32 {
 			FBig => EFBIG,
 			IlSeq => EILSEQ,
 			NotSup => ENOTSUP,
+			TimedOut => ETIMEDOUT,
+			NoLink => ENOLINK,
+			IO => EIO,
 		}
 	}
 }
 
-pub fn respond<T, R, F>(reply: R, f: F)
+pub fn respond<T, F, R, C>(reply: R, f: C)
 where
-	R: Reply<T>,
-	F: FnOnce() -> Result<T, Error>,
+	R: Reply<T> + Send + 'static,
+	F: Future<Output = Result<T, Error>> + Send + 'static,
+	C: FnOnce() -> MaybeAsync<Result<T, Error>, F>,
 {
-	match f() {
+	let resolve = |result| match result {
 		Ok(val) => reply.ok(val),
 		Err(err) => reply.error(err),
+	};
+	
+	match f() {
+		MaybeAsync::Sync(result) => resolve(result),
+		MaybeAsync::Async(future) => {
+			tokio::spawn(async {
+				let result = future.await;
+				resolve(result);
+			});
+		},
 	}
 }
 
@@ -80,16 +99,16 @@ impl Reply<EntryReply> for ReplyEntry {
 }
 
 #[derive(Debug)]
-pub struct DirectoryReplyEntry<'a> {
+pub struct DirectoryReplyEntry {
 	pub ino: u64,
-	pub name: &'a str,
+	pub name: String,
 	pub offset: i64,
 	pub kind: FileType,
 }
 
-impl<'a, I> Reply<I> for ReplyDirectory
+impl<I> Reply<I> for ReplyDirectory
 where
-	I: Iterator<Item = DirectoryReplyEntry<'a>>,
+	I: IntoIterator<Item = DirectoryReplyEntry>,
 {
 	fn ok(mut self, iter: I) {
 		for entry in iter {
@@ -125,9 +144,12 @@ impl Reply<CreateReply> for ReplyCreate {
 	}
 }
 
-impl<'a> Reply<&'a [u8]> for ReplyData {
-	fn ok(self, val: &'a [u8]) {
-		self.data(val);
+impl<T> Reply<T> for ReplyData
+where
+	T: AsRef<[u8]>,
+{
+	fn ok(self, val: T) {
+		self.data(val.as_ref());
 	}
 	
 	fn error(self, err: Error) {

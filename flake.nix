@@ -5,7 +5,6 @@
 		
 		crane = {
 			url = "github:ipetkov/crane";
-			inputs.nixpkgs.follows = "nixpkgs";
 		};
 		
 		fenix = {
@@ -17,12 +16,22 @@
 	outputs = { self, nixpkgs, flake-utils, ... } @ inputs: let
 		makeCraneLib = pkgs: let
 			fenix = inputs.fenix.packages.${pkgs.system};
-			fenixToolchain = fenix.stable.defaultToolchain;
+			fenixToolchain = fenix.default.withComponents [
+				"rustc"
+				"cargo"
+				"rust-std"
+				"rust-docs"
+				"clippy"
+			];
 		in (inputs.crane.mkLib pkgs).overrideToolchain fenixToolchain;
 	in {
 		overlays = {
 			fye = final: prev: {
 				fye = {
+					server = prev.callPackage ./nix/server.nix {
+						craneLib = makeCraneLib final;
+					};
+					
 					client = prev.callPackage ./nix/client.nix {
 						craneLib = makeCraneLib final;
 					};
@@ -40,12 +49,18 @@
 			craneLib = makeCraneLib pkgs;
 		in {
 			packages = {
-				inherit (pkgs.fye) client;
+				inherit (pkgs.fye) server client;
 			};
 			
 			devShells.default = craneLib.devShell {
 				packages = with pkgs; [
 					rust-analyzer
+					pkg-config
+					openssl
+				];
+				
+				LD_LIBRARY_PATH = with pkgs; lib.makeLibraryPath [
+					openssl
 				];
 			};
 		}

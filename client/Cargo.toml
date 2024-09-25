@@ -1,0 +1,22 @@
+[package]
+name = "fye_client"
+version.workspace = true
+authors.workspace = true
+edition = "2021"
+
+[[bin]]
+name = "fye"
+path = "src/main.rs"
+
+[dependencies]
+fye_shared.workspace = true
+serde.workspace = true
+fuser = { version = "0.14", default-features = false }
+libc = "0.2"
+reqwest = "0.12"
+tokio = { version = "1.40", features = ["rt", "net", "rt-multi-thread"] }
+bytes = "1.7"
+postcard = { version = "1.0", features = ["use-std"] }
+thiserror = "1.0"
+either = "1.13"
+futures-util = "0.3"

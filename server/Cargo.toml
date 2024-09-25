@@ -1,0 +1,15 @@
+[package]
+name = "fye_server"
+version.workspace = true
+authors.workspace = true
+edition = "2021"
+
+[[bin]]
+name = "fye-server"
+path = "src/main.rs"
+
+[dependencies]
+fye_shared.workspace = true
+axum = { version = "0.7", default-features = false, features = ["http1", "http2", "tokio"] }
+tokio = { version = "1.40", features = ["rt", "net", "macros", "rt-multi-thread"] }
+axum-postcard = "0.1"
