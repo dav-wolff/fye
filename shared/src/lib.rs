@@ -53,7 +53,7 @@ impl DirectoryInfo {
 	}
 }
 
-#[derive(Serialize, Deserialize, PartialEq, Eq, Clone, Debug)]
+#[derive(Serialize, Deserialize, Default, PartialEq, Eq, Clone, Debug)]
 pub struct FileInfo {
 	pub size: u64,
 }

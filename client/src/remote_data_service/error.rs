@@ -76,6 +76,29 @@ impl From<Error> for FetchNodeError {
 }
 
 #[derive(Debug)]
+pub enum FetchDirectoryError {
+	NetworkFailure(NetworkError),
+	ServerError,
+	ProtocolMismatch,
+	NotFound,
+	NotADirectory,
+}
+
+impl From<Error> for FetchDirectoryError {
+	fn from(value: Error) -> Self {
+		use Error::*;
+		
+		match value {
+			NetworkFailure(err) => Self::NetworkFailure(err),
+			ServerError => Self::ServerError,
+			NotFound => Self::NotFound,
+			NotADirectory => Self::NotADirectory,
+			ProtocolMismatch | _ => Self::ProtocolMismatch,
+		}
+	}
+}
+
+#[derive(Debug)]
 pub enum FetchFileError {
 	NetworkFailure(NetworkError),
 	ServerError,

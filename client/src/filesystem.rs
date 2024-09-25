@@ -1,10 +1,10 @@
-use std::{cmp, collections::HashMap, ffi::OsStr, future::Future, time::{Duration, UNIX_EPOCH}};
+use std::{cmp, ffi::OsStr, time::{Duration, UNIX_EPOCH}};
 
 use fuser::{FileAttr, FileType, Filesystem, ReplyAttr, ReplyData, ReplyDirectory, ReplyEntry, Request};
 use futures_util::{stream::FuturesOrdered, StreamExt};
 use fye_shared::{DirectoryInfo, NodeID, NodeInfo};
 
-use crate::{maybe_async::MaybeAsync::{self, Async, Sync}, remote_data_service::{CreateNodeError, FetchFileError, FetchNodeError, NetworkError, RemoteDataService}, MaybeAsync};
+use crate::{local_file_cache::LocalFileCache, maybe_async::MaybeAsync::{self, Async, Sync}, remote_data_service::{CreateNodeError, FetchDirectoryError, FetchFileError, FetchNodeError, NetworkError}, MaybeAsync};
 
 mod reply;
 use reply::*;
@@ -20,10 +20,9 @@ pub struct FyeFilesystem {
 }
 
 impl FyeFilesystem {
-	pub fn new(remote_data_fetcher: RemoteDataService) -> Self {
+	pub fn new(local_file_cache: LocalFileCache) -> Self {
 		let inner = FyeFilesystemInner {
-			remote_data_service: remote_data_fetcher,
-			node_infos: Default::default(),
+			local_file_cache,
 		};
 		
 		Self {
@@ -35,18 +34,13 @@ impl FyeFilesystem {
 
 #[derive(Debug)]
 struct FyeFilesystemInner {
-	remote_data_service: RemoteDataService,
-	node_infos: HashMap<NodeID, NodeInfo>,
+	local_file_cache: LocalFileCache,
 }
 
 impl FyeFilesystemInner {
-	fn attr_for(&self, id: NodeID) -> MaybeAsync!(Result<FileAttr, reply::Error>) {
-		let info = self.node_infos.get(&id)
-			.map(|info| Sync(Ok(info.clone())))
-			.unwrap_or_else(|| Async(self.remote_data_service.fetch_node_info(id)));
-		
-		info.map(move |info| {
-			let info = info.map_err(|_| reply::Error::NoEnt)?; // TODO: handle errors besides missing
+	fn attr_for(&self, id: NodeID) -> MaybeAsync!(Result<FileAttr, Error>) {
+		self.local_file_cache.get_node_info(id).map(move |info| {
+			let info = info.map_err(|_| Error::NoEnt)?; // TODO: handle errors besides missing
 			
 			let (size, kind, perm) = match info {
 				NodeInfo::Directory(_) => (0, FileType::Directory, DIR_PERMISSIONS),
@@ -73,10 +67,8 @@ impl FyeFilesystemInner {
 		})
 	}
 	
-	fn get_node(&self, id: NodeID) -> MaybeAsync!(Result<NodeInfo, reply::Error>) {
-		self.node_infos.get(&id)
-			.map(|info| Sync(Ok(info.clone())))
-			.unwrap_or_else(|| Async(self.remote_data_service.fetch_node_info(id)))
+	fn get_node(&self, id: NodeID) -> MaybeAsync!(Result<NodeInfo, Error>) {
+		self.local_file_cache.get_node_info(id)
 			.map(|info| info.map_err(|err| match err {
 				FetchNodeError::NetworkFailure(NetworkError::Timeout) => Error::TimedOut,
 				FetchNodeError::NetworkFailure(NetworkError::Other) => Error::NoLink,
@@ -85,19 +77,16 @@ impl FyeFilesystemInner {
 			}))
 	}
 	
-	fn get_directory(&self, id: NodeID) -> MaybeAsync!(Result<DirectoryInfo, reply::Error>) {
-		let info = self.node_infos.get(&id)
-			.map(|info| Sync(Ok(info.clone())))
-			.unwrap_or_else(|| Async(self.remote_data_service.fetch_node_info(id)));
-		
-		info.map(|info| match info {
-			Err(FetchNodeError::NetworkFailure(NetworkError::Timeout)) => Err(Error::TimedOut),
-			Err(FetchNodeError::NetworkFailure(NetworkError::Other)) => Err(Error::NoLink),
-			Err(FetchNodeError::ServerError | FetchNodeError::ProtocolMismatch) => Err(Error::IO),
-			Err(FetchNodeError::NotFound) => Err(Error::NoEnt),
-			Ok(NodeInfo::File(_)) => Err(reply::Error::NotDir),
-			Ok(NodeInfo::Directory(dir_info)) => Ok(dir_info),
-		})
+	fn get_directory(&self, id: NodeID) -> MaybeAsync!(Result<DirectoryInfo, Error>) {
+		self.local_file_cache.get_dir_info(id)
+			.map(|info| match info {
+				Err(FetchDirectoryError::NetworkFailure(NetworkError::Timeout)) => Err(Error::TimedOut),
+				Err(FetchDirectoryError::NetworkFailure(NetworkError::Other)) => Err(Error::NoLink),
+				Err(FetchDirectoryError::ServerError | FetchDirectoryError::ProtocolMismatch) => Err(Error::IO),
+				Err(FetchDirectoryError::NotFound) => Err(Error::NoEnt),
+				Err(FetchDirectoryError::NotADirectory) => Err(Error::NotDir),
+				Ok(dir_info) => Ok(dir_info),
+			})
 	}
 }
 
@@ -121,13 +110,13 @@ impl Filesystem for FyeFilesystem {
 		println!("lookup");
 		let this = self.inner;
 		respond(reply, || {
-			let name = name.to_str().ok_or(reply::Error::NoEnt)?.to_owned();
+			let name = name.to_str().ok_or(Error::NoEnt)?.to_owned();
 			
 			this.get_directory(NodeID(parent)).chain(move |dir_info| {
 				let dir_info = dir_info?;
 				
 				let Some(&entry) = dir_info.children.get(&name) else {
-					return Sync(Err(reply::Error::NoEnt));
+					return Sync(Err(Error::NoEnt));
 				};
 				
 				this.attr_for(entry).map(|attr| {
@@ -193,10 +182,10 @@ impl Filesystem for FyeFilesystem {
 		println!("mkdir");
 		let this = self.inner;
 		respond(reply, || {
-			let name = name.to_str().ok_or(reply::Error::IlSeq)?.to_owned();
+			let name = name.to_str().ok_or(Error::IlSeq)?.to_owned();
 			
-			MaybeAsync::Async(async move {
-				let id = this.remote_data_service.create_dir(NodeID(parent), name).await
+			Async(async move {
+				let id = this.local_file_cache.create_dir(NodeID(parent), name).await
 					.map_err(|err| match err {
 						CreateNodeError::NetworkFailure(NetworkError::Timeout) => Error::TimedOut,
 						CreateNodeError::NetworkFailure(NetworkError::Other) => Error::NoLink,
@@ -243,17 +232,17 @@ impl Filesystem for FyeFilesystem {
 			} else if file_kind == libc::S_IFREG {
 				false
 			} else {
-				Err(reply::Error::NotSup)?;
+				Err(Error::NotSup)?;
 				unreachable!();
 			};
 			
-			let name = name.to_str().ok_or(reply::Error::IlSeq)?.to_owned();
+			let name = name.to_str().ok_or(Error::IlSeq)?.to_owned();
 			
 			Async(async move {
 				let result = if is_directory {
-					this.remote_data_service.create_dir(NodeID(parent), name).await
+					this.local_file_cache.create_dir(NodeID(parent), name).await
 				} else {
-					this.remote_data_service.create_file(NodeID(parent), name).await
+					this.local_file_cache.create_file(NodeID(parent), name).await
 				};
 				
 				let id = result.map_err(|err| match err {
@@ -332,7 +321,7 @@ impl Filesystem for FyeFilesystem {
 		// respond(reply, || -> MaybeAsync<_> {
 			// if let Some(size) = size {
 			// 	if size > MAX_FILE_SIZE {
-			// 		Err(reply::Error::FBig)?;
+			// 		Err(Error::FBig)?;
 			// 	}
 				
 			// 	let file = get_file_mut(&mut self.node_infos, ino)?;
@@ -360,16 +349,15 @@ impl Filesystem for FyeFilesystem {
 	) {
 		println!("read");
 		let this = self.inner;
-		respond(reply, || -> MaybeAsync<_, _> {
-			Async(async move {
-				let data = this.remote_data_service.fetch_file_data(NodeID(ino)).await
-					.map_err(|err| match err {
-						FetchFileError::NetworkFailure(NetworkError::Timeout) => Error::TimedOut,
-						FetchFileError::NetworkFailure(NetworkError::Other) => Error::NoLink,
-						FetchFileError::ServerError | FetchFileError::ProtocolMismatch => Error::IO,
-						FetchFileError::NotFound => Error::NoEnt,
-						FetchFileError::NotAFile => Error::IsDir,
-					})?;
+		respond(reply, || {
+			this.local_file_cache.get_file_data(NodeID(ino)).map(move |data| {
+				let data = data.map_err(|err| match err {
+					FetchFileError::NetworkFailure(NetworkError::Timeout) => Error::TimedOut,
+					FetchFileError::NetworkFailure(NetworkError::Other) => Error::NoLink,
+					FetchFileError::ServerError | FetchFileError::ProtocolMismatch => Error::IO,
+					FetchFileError::NotFound => Error::NoEnt,
+					FetchFileError::NotAFile => Error::IsDir,
+				})?;
 				
 				let start = cmp::min(offset as usize, data.len());
 				let end = cmp::min(offset as usize + size as usize, data.len());
@@ -396,7 +384,7 @@ impl Filesystem for FyeFilesystem {
 			let data = data.to_owned();
 			
 			Async(async move {
-				this.remote_data_service.write_file_data(NodeID(ino), offset.try_into().unwrap(), data).await
+				this.local_file_cache.write_file_data(NodeID(ino), offset.try_into().unwrap(), data).await
 					.map_err(|err| match err {
 						FetchFileError::NetworkFailure(NetworkError::Timeout) => Error::TimedOut,
 						FetchFileError::NetworkFailure(NetworkError::Other) => Error::NoLink,

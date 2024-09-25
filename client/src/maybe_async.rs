@@ -3,7 +3,7 @@ use std::{convert::Infallible, future::{self, Future}, ops::FromResidual};
 #[macro_export]
 macro_rules! MaybeAsync {
 	($t: ty) => {
-		MaybeAsync<$t, impl Future<Output = $t>>
+		MaybeAsync<$t, impl std::future::Future<Output = $t>>
 	};
 }
 

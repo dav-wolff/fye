@@ -1,12 +1,12 @@
 use std::future::Future;
 
 use bytes::Bytes;
-use fye_shared::{NodeID, NodeInfo};
+use fye_shared::{DirectoryInfo, NodeID, NodeInfo};
 use reqwest::{header, Client, StatusCode, Url};
 
 mod error;
 use error::*;
-pub use error::{NetworkError, FetchNodeError, FetchFileError, CreateNodeError};
+pub use error::{NetworkError, FetchNodeError, FetchDirectoryError, FetchFileError, CreateNodeError};
 
 mod reqwest_postcard;
 use reqwest_postcard::*;
@@ -31,6 +31,18 @@ impl RemoteDataService {
 	
 	pub fn fetch_node_info(&self, id: NodeID) -> impl Future<Output = Result<NodeInfo, FetchNodeError>> {
 		let url = self.base_url.join(&format!("node/{id}")).expect("url should be valid");
+		let request = self.client.get(url);
+		
+		async {
+			let data = decode_errors(request, StatusCode::OK).await?
+				.postcard().await?;
+			
+			Ok(data)
+		}
+	}
+	
+	pub fn fetch_dir_info(&self, id: NodeID) -> impl Future<Output = Result<DirectoryInfo, FetchDirectoryError>> {
+		let url = self.base_url.join(&format!("dir/{id}")).expect("url should be valid");
 		let request = self.client.get(url);
 		
 		async {
@@ -66,10 +78,10 @@ impl RemoteDataService {
 		}
 	}
 	
-	pub fn create_dir(&self, parent_id: NodeID, name: String) -> impl Future<Output = Result<NodeID, CreateNodeError>> {
+	pub fn create_dir(&self, parent_id: NodeID, name: &str) -> impl Future<Output = Result<NodeID, CreateNodeError>> {
 		let url = self.base_url.join(&format!("dir/{parent_id}/new-dir")).expect("url should be valid");
 		let request = self.client.post(url)
-			.postcard(&name);
+			.postcard(name); // &str and String are serialized the same
 		
 		async {
 			let response = decode_errors(request, StatusCode::CREATED).await?;
@@ -83,13 +95,13 @@ impl RemoteDataService {
 		}
 	}
 	
-	pub fn create_file(&self, parent_id: NodeID, name: String) -> impl Future<Output = Result<NodeID, CreateNodeError>> {
+	pub fn create_file(&self, parent_id: NodeID, name: &str) -> impl Future<Output = Result<NodeID, CreateNodeError>> {
 		let url = self.base_url.join(&format!("dir/{parent_id}/new-file")).expect("url should be valid");
 		let request = self.client.post(url)
-			.postcard(&name);
+			.postcard(name); // &str and String are serialized the same
 		
 		async {
-			let response = decode_errors(request, StatusCode::CREATED).await.unwrap();
+			let response = decode_errors(request, StatusCode::CREATED).await?;
 			let location = response.headers().get(header::LOCATION).ok_or(CreateNodeError::ProtocolMismatch)?
 				.to_str().map_err(|_| Error::ProtocolMismatch)?;
 			
