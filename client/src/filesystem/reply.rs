@@ -1,6 +1,6 @@
 use std::{future::Future, time::Duration};
 
-use fuser::{FileAttr, FileType, ReplyAttr, ReplyCreate, ReplyData, ReplyDirectory, ReplyEntry, ReplyWrite};
+use fuser::{FileAttr, FileType, ReplyAttr, ReplyCreate, ReplyData, ReplyDirectory, ReplyEmpty, ReplyEntry, ReplyWrite};
 
 use crate::maybe_async::MaybeAsync;
 
@@ -10,6 +10,7 @@ pub enum Error {
 	NotDir,
 	IsDir,
 	Exist,
+	NotEmpty,
 	FBig,
 	IlSeq,
 	NotSup,
@@ -28,6 +29,7 @@ impl From<Error> for i32 {
 			NotDir => ENOTDIR,
 			IsDir => EISDIR,
 			Exist => EEXIST,
+			NotEmpty => ENOTEMPTY,
 			FBig => EFBIG,
 			IlSeq => EILSEQ,
 			NotSup => ENOTSUP,
@@ -160,6 +162,16 @@ where
 impl Reply<u32> for ReplyWrite {
 	fn ok(self, val: u32) {
 		self.written(val);
+	}
+	
+	fn error(self, err: Error) {
+		self.error(err.into());
+	}
+}
+
+impl Reply<()> for ReplyEmpty {
+	fn ok(self, _val: ()) {
+		self.ok();
 	}
 	
 	fn error(self, err: Error) {

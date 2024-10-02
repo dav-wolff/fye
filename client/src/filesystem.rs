@@ -1,10 +1,10 @@
 use std::{cmp, ffi::OsStr, time::{Duration, UNIX_EPOCH}};
 
-use fuser::{FileAttr, FileType, Filesystem, ReplyAttr, ReplyData, ReplyDirectory, ReplyEntry, Request};
+use fuser::{FileAttr, FileType, Filesystem, ReplyAttr, ReplyCreate, ReplyData, ReplyDirectory, ReplyEntry, ReplyWrite, Request};
 use futures_util::{stream::FuturesOrdered, StreamExt};
 use fye_shared::{DirectoryInfo, NodeID, NodeInfo};
 
-use crate::{local_file_cache::LocalFileCache, maybe_async::MaybeAsync::{self, Async, Sync}, remote_data_service::{CreateNodeError, FetchDirectoryError, FetchFileError, FetchNodeError, NetworkError}, MaybeAsync};
+use crate::{local_file_cache::LocalFileCache, maybe_async::MaybeAsync::{self, Async, Sync}, remote_data_service::{CreateNodeError, DeleteDirectoryError, DeleteFileError, FetchDirectoryError, FetchFileError, FetchNodeError, NetworkError}, MaybeAsync};
 
 mod reply;
 use reply::*;
@@ -222,7 +222,7 @@ impl Filesystem for FyeFilesystem {
 		})
 	}
 	
-	fn create(&mut self, _req: &Request<'_>, parent: u64, name: &OsStr, mode: u32, _umask: u32, _flags: i32, reply: fuser::ReplyCreate) {
+	fn create(&mut self, _req: &Request<'_>, parent: u64, name: &OsStr, mode: u32, _umask: u32, _flags: i32, reply: ReplyCreate) {
 		println!("create");
 		let this = self.inner;
 		respond(reply, || {
@@ -232,8 +232,7 @@ impl Filesystem for FyeFilesystem {
 			} else if file_kind == libc::S_IFREG {
 				false
 			} else {
-				Err(Error::NotSup)?;
-				unreachable!();
+				return Sync(Err(Error::NotSup));
 			};
 			
 			let name = name.to_str().ok_or(Error::IlSeq)?.to_owned();
@@ -336,6 +335,50 @@ impl Filesystem for FyeFilesystem {
 		// })
 	}
 	
+	fn unlink(&mut self, _req: &Request<'_>, parent: u64, name: &OsStr, reply: fuser::ReplyEmpty) {
+		println!("unlink");
+		let this = self.inner;
+		respond(reply, || {
+			let name = name.to_str().ok_or(Error::IlSeq)?.to_owned();
+			
+			Async(async move {
+				this.local_file_cache.delete_file(NodeID(parent), name).await
+					.map_err(|err| match err {
+						DeleteFileError::NetworkFailure(NetworkError::Timeout) => Error::TimedOut,
+						DeleteFileError::NetworkFailure(NetworkError::Other) => Error::NoLink,
+						DeleteFileError::ServerError | DeleteFileError::ProtocolMismatch => Error::IO,
+						DeleteFileError::NotFound => Error::NoEnt,
+						DeleteFileError::ParentNotADirectory => Error::NotDir,
+						DeleteFileError::NotAFile => Error::IsDir,
+					})?;
+				
+				Ok(())
+			})
+		})
+	}
+	
+	fn rmdir(&mut self, _req: &Request<'_>, parent: u64, name: &OsStr, reply: fuser::ReplyEmpty) {
+		println!("rmdir");
+		let this = self.inner;
+		respond(reply, || {
+			let name = name.to_str().ok_or(Error::IlSeq)?.to_owned();
+			
+			Async(async move {
+				this.local_file_cache.delete_dir(NodeID(parent), name).await
+					.map_err(|err| match err {
+						DeleteDirectoryError::NetworkFailure(NetworkError::Timeout) => Error::TimedOut,
+						DeleteDirectoryError::NetworkFailure(NetworkError::Other) => Error::NoLink,
+						DeleteDirectoryError::ServerError | DeleteDirectoryError::ProtocolMismatch => Error::IO,
+						DeleteDirectoryError::NotFound => Error::NoEnt,
+						DeleteDirectoryError::NotADirectory => Error::NotDir,
+						DeleteDirectoryError::NotEmpty => Error::NotEmpty,
+					})?;
+				
+				Ok(())
+			})
+		})
+	}
+	
 	fn read(
 		&mut self,
 		_req: &Request,
@@ -376,7 +419,7 @@ impl Filesystem for FyeFilesystem {
 		_write_flags: u32,
 		_flags: i32,
 		_lock_owner: Option<u64>,
-		reply: fuser::ReplyWrite,
+		reply: ReplyWrite,
 	) {
 		println!("write");
 		let this = self.inner;

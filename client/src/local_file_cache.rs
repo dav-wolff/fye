@@ -1,6 +1,6 @@
 use std::{collections::HashMap, future::Future, sync::{Arc, RwLock}};
 
-use crate::{maybe_async::MaybeAsync, remote_data_service::{CreateNodeError, FetchDirectoryError, FetchFileError}};
+use crate::{maybe_async::MaybeAsync, remote_data_service::{CreateNodeError, DeleteDirectoryError, DeleteFileError, FetchDirectoryError, FetchFileError}};
 use bytes::Bytes;
 use fye_shared::{DirectoryInfo, FileInfo, NodeID, NodeInfo};
 
@@ -99,6 +99,52 @@ impl LocalFileCache {
 			}
 			
 			Ok(id)
+		}
+	}
+	
+	fn delete_node_from_local_cache(local_cache: &mut HashMap<NodeID, NodeInfo>, parent_id: NodeID, name: &str) {
+		let Some(NodeInfo::Directory(parent_info)) = local_cache.get_mut(&parent_id) else {
+			return;
+		};
+		
+		let Some(removed) = parent_info.children.remove(name) else {
+			return;
+		};
+		
+		let mut to_be_deleted = vec![removed];
+		
+		while let Some(node) = to_be_deleted.pop() {
+			if let Some(NodeInfo::Directory(dir_info)) = local_cache.remove(&node) {
+				to_be_deleted.extend(dir_info.children.values());
+			}
+		}
+	}
+	
+	pub fn delete_dir(&self, parent_id: NodeID, name: String) -> impl Future<Output = Result<(), DeleteDirectoryError>> {
+		let request = self.remote_data_service.delete_dir(parent_id, &name);
+		let local_cache = self.local_cache.clone();
+		
+		async move {
+			request.await?;
+			
+			let mut local_cache = local_cache.write().expect("poison");
+			Self::delete_node_from_local_cache(&mut local_cache, parent_id, &name);
+			
+			Ok(())
+		}
+	}
+	
+	pub fn delete_file(&self, parent_id: NodeID, name: String) -> impl Future<Output = Result<(), DeleteFileError>> {
+		let request = self.remote_data_service.delete_file(parent_id, &name);
+		let local_cache = self.local_cache.clone();
+		
+		async move {
+			request.await?;
+			
+			let mut local_cache = local_cache.write().expect("poison");
+			Self::delete_node_from_local_cache(&mut local_cache, parent_id, &name);
+			
+			Ok(())
 		}
 	}
 }

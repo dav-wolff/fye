@@ -31,6 +31,8 @@ async fn main() {
 		.route("/api/dir/:id", get(dir_info))
 		.route("/api/dir/:id/new-dir", post(create_dir))
 		.route("/api/dir/:id/new-file", post(create_file))
+		.route("/api/dir/:id/delete-dir", post(delete_dir))
+		.route("/api/dir/:id/delete-file", post(delete_file))
 		.route("/api/file/:id", get(file_info))
 		.route("/api/file/:id/data", get(file_data).patch(write_file_data))
 		.with_state(Arc::new(app_state));
@@ -57,7 +59,7 @@ enum Node {
 }
 
 async fn node_info(State(app_state): State<Arc<AppState>>, Path(id): Path<NodeID>) -> Result<Postcard<NodeInfo>, Error> {
-	let nodes = app_state.nodes.read().expect("should not be poisoned");
+	let nodes = app_state.nodes.read().expect("poison");
 	
 	let node_info = match nodes.nodes.get(&id).ok_or(Error::NotFound)? {
 		Node::Directory(dir_info) => NodeInfo::Directory(dir_info.clone()),
@@ -70,7 +72,7 @@ async fn node_info(State(app_state): State<Arc<AppState>>, Path(id): Path<NodeID
 }
 
 async fn dir_info(State(app_state): State<Arc<AppState>>, Path(id): Path<NodeID>) -> Result<Postcard<DirectoryInfo>, Error> {
-	let nodes = app_state.nodes.read().expect("should not be poisoned");
+	let nodes = app_state.nodes.read().expect("poison");
 	
 	match nodes.nodes.get(&id) {
 		None => Err(Error::NotFound),
@@ -80,7 +82,7 @@ async fn dir_info(State(app_state): State<Arc<AppState>>, Path(id): Path<NodeID>
 }
 
 async fn file_info(State(app_state): State<Arc<AppState>>, Path(id): Path<NodeID>) -> Result<Postcard<FileInfo>, Error> {
-	let nodes = app_state.nodes.read().expect("should not be poisoned");
+	let nodes = app_state.nodes.read().expect("poison");
 	
 	match nodes.nodes.get(&id) {
 		None => Err(Error::NotFound),
@@ -92,7 +94,7 @@ async fn file_info(State(app_state): State<Arc<AppState>>, Path(id): Path<NodeID
 }
 
 async fn file_data(State(app_state): State<Arc<AppState>>, Path(id): Path<NodeID>) -> Result<Vec<u8>, Error> {
-	let nodes = app_state.nodes.read().expect("should not be poisoned");
+	let nodes = app_state.nodes.read().expect("poison");
 	
 	match nodes.nodes.get(&id) {
 		None => Err(Error::NotFound),
@@ -102,7 +104,7 @@ async fn file_data(State(app_state): State<Arc<AppState>>, Path(id): Path<NodeID
 }
 
 async fn write_file_data(State(app_state): State<Arc<AppState>>, Path(id): Path<NodeID>, Postcard((offset, data)): Postcard<(u64, Vec<u8>)>) -> Result<Postcard<u32>, Error> {
-	let mut nodes = app_state.nodes.write().expect("should not be poisoned");
+	let mut nodes = app_state.nodes.write().expect("poison");
 	
 	let file_data = match nodes.nodes.get_mut(&id) {
 		None => return Err(Error::NotFound),
@@ -123,7 +125,7 @@ async fn write_file_data(State(app_state): State<Arc<AppState>>, Path(id): Path<
 }
 
 fn new_node(nodes: &RwLock<Nodes>, parent_id: NodeID, name: String, node: Node) -> Result<NodeID, Error> {
-	let mut nodes = nodes.write().expect("should not be poisoned");
+	let mut nodes = nodes.write().expect("poison");
 	
 	let parent_info = match nodes.nodes.get(&parent_id) {
 		None => return Err(Error::NotFound),
@@ -164,6 +166,7 @@ fn new_node(nodes: &RwLock<Nodes>, parent_id: NodeID, name: String, node: Node) 
 
 async fn create_dir(State(app_state): State<Arc<AppState>>, Path(parent_id): Path<NodeID>, Postcard(name): Postcard<String>) -> Result<(StatusCode, HeaderMap), Error> {
 	let id = new_node(&app_state.nodes, parent_id, name, Node::Directory(DirectoryInfo::with_parent(parent_id)))?;
+	
 	let mut headers = HeaderMap::new();
 	headers.insert(header::LOCATION, format!("/api/dir/{id}").parse().expect("should be a valid header value"));
 	
@@ -177,4 +180,64 @@ async fn create_file(State(app_state): State<Arc<AppState>>, Path(parent_id): Pa
 	headers.insert(header::LOCATION, format!("/api/file/{id}").parse().expect("should be a valid header value"));
 	
 	Ok((StatusCode::CREATED, headers))
+}
+
+async fn delete_dir(State(app_state): State<Arc<AppState>>, Path(parent_id): Path<NodeID>, Postcard(name): Postcard<String>) -> Result<StatusCode, Error> {
+	let mut nodes = app_state.nodes.write().expect("poison");
+	
+	// check this early, if an error occurs there's no need for exclusive access
+	let parent_info = match nodes.nodes.get(&parent_id) {
+		None => return Err(Error::NotFound),
+		Some(Node::File(_)) => return Err(Error::NotADirectory),
+		Some(Node::Directory(info)) => info,
+	};
+	
+	let Some(&entry) = parent_info.children.get(&name) else {
+		return Err(Error::NotFound);
+	};
+	
+	match nodes.nodes.get(&entry) {
+		None => return Err(Error::NotFound),
+		Some(Node::File(_)) => return Err(Error::NotADirectory),
+		Some(Node::Directory(dir)) if !dir.children.is_empty() => return Err(Error::DirectoryNotEmpty),
+		_ => (),
+	}
+	
+	let Some(Node::Directory(ref mut parent_info)) = nodes.nodes.get_mut(&parent_id) else {
+		unreachable!("existed earlier during exclusive lock");
+	};
+	
+	parent_info.children.remove(&name).expect("should exist");
+	nodes.nodes.remove(&entry).expect("should exist");
+	
+	Ok(StatusCode::NO_CONTENT)
+}
+
+async fn delete_file(State(app_state): State<Arc<AppState>>, Path(parent_id): Path<NodeID>, Postcard(name): Postcard<String>) -> Result<StatusCode, Error> {
+	let mut nodes = app_state.nodes.write().expect("poison");
+	
+	let parent_info = match nodes.nodes.get(&parent_id) {
+		None => return Err(Error::NotFound),
+		Some(Node::File(_)) => return Err(Error::NotADirectory),
+		Some(Node::Directory(info)) => info,
+	};
+	
+	let Some(&entry) = parent_info.children.get(&name) else {
+		return Err(Error::NotFound);
+	};
+	
+	match nodes.nodes.get(&entry) {
+		None => return Err(Error::NotFound),
+		Some(Node::Directory(_)) => return Err(Error::NotAFile),
+		Some(Node::File(_)) => (),
+	}
+	
+	let Some(Node::Directory(ref mut parent_info)) = nodes.nodes.get_mut(&parent_id) else {
+		unreachable!("existed earlier during exclusive lock");
+	};
+	
+	parent_info.children.remove(&name).expect("should exist");
+	nodes.nodes.remove(&entry).expect("should exist");
+	
+	Ok(StatusCode::NO_CONTENT)
 }

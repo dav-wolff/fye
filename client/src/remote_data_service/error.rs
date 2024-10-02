@@ -18,6 +18,7 @@ pub enum Error {
 	NotAFile,
 	NotADirectory,
 	AlreadyExists,
+	DirectoryNotEmpty,
 }
 
 impl Error {
@@ -47,6 +48,7 @@ pub async fn decode_errors(request: RequestBuilder, expected_status: StatusCode)
 				b"Not A File" => Error::NotAFile,
 				b"Not A Directory" => Error::NotADirectory,
 				b"Already Exists" => Error::AlreadyExists,
+				b"Directory Not Empty" => Error::DirectoryNotEmpty,
 				_ => Error::ProtocolMismatch,
 			}
 		},
@@ -141,6 +143,56 @@ impl From<Error> for CreateNodeError {
 			NotFound => Self::ParentNotFound,
 			NotADirectory => Self::ParentNotADirectory,
 			AlreadyExists => Self::AlreadyExists,
+			ProtocolMismatch | _ => Self::ProtocolMismatch,
+		}
+	}
+}
+
+#[derive(Debug)]
+pub enum DeleteDirectoryError {
+	NetworkFailure(NetworkError),
+	ServerError,
+	ProtocolMismatch,
+	NotFound, // could refer to parent or child
+	NotADirectory, // could refer to parent or child
+	NotEmpty,
+}
+
+impl From<Error> for DeleteDirectoryError {
+	fn from(value: Error) -> Self {
+		use Error::*;
+		
+		match value {
+			NetworkFailure(err) => Self::NetworkFailure(err),
+			ServerError => Self::ServerError,
+			NotFound => Self::NotFound,
+			NotADirectory => Self::NotADirectory,
+			DirectoryNotEmpty => Self::NotEmpty,
+			ProtocolMismatch | _ => Self::ProtocolMismatch,
+		}
+	}
+}
+
+#[derive(Debug)]
+pub enum DeleteFileError {
+	NetworkFailure(NetworkError),
+	ServerError,
+	ProtocolMismatch,
+	NotFound, // could refer to parent or child
+	ParentNotADirectory,
+	NotAFile,
+}
+
+impl From<Error> for DeleteFileError {
+	fn from(value: Error) -> Self {
+		use Error::*;
+		
+		match value {
+			NetworkFailure(err) => Self::NetworkFailure(err),
+			ServerError => Self::ServerError,
+			NotFound => Self::NotFound,
+			NotADirectory => Self::ParentNotADirectory,
+			NotAFile => Self::NotAFile,
 			ProtocolMismatch | _ => Self::ProtocolMismatch,
 		}
 	}

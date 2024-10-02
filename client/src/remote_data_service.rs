@@ -6,7 +6,7 @@ use reqwest::{header, Client, StatusCode, Url};
 
 mod error;
 use error::*;
-pub use error::{NetworkError, FetchNodeError, FetchDirectoryError, FetchFileError, CreateNodeError};
+pub use error::{NetworkError, FetchNodeError, FetchDirectoryError, FetchFileError, CreateNodeError, DeleteDirectoryError, DeleteFileError};
 
 mod reqwest_postcard;
 use reqwest_postcard::*;
@@ -109,6 +109,28 @@ impl RemoteDataService {
 			let (_, id) = location.split_at(index + 1);
 			
 			Ok(id.parse().map_err(|_| Error::ProtocolMismatch)?)
+		}
+	}
+	
+	pub fn delete_dir(&self, parent_id: NodeID, name: &str) -> impl Future<Output = Result<(), DeleteDirectoryError>> {
+		let url = self.base_url.join(&format!("dir/{parent_id}/delete-dir")).expect("url should be valid");
+		let request = self.client.post(url)
+			.postcard(name); // &str and String are serialized the same
+		
+		async {
+			decode_errors(request, StatusCode::NO_CONTENT).await?;
+			Ok(())
+		}
+	}
+	
+	pub fn delete_file(&self, parent_id: NodeID, name: &str) -> impl Future<Output = Result<(), DeleteFileError>> {
+		let url = self.base_url.join(&format!("dir/{parent_id}/delete-file")).expect("url should be valid");
+		let request = self.client.post(url)
+			.postcard(name); // &str and String are serialized the same
+		
+		async {
+			decode_errors(request, StatusCode::NO_CONTENT).await?;
+			Ok(())
 		}
 	}
 }

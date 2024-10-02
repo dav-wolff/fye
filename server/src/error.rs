@@ -6,6 +6,7 @@ pub enum Error {
 	NotAFile,
 	NotADirectory,
 	AlreadyExists(String),
+	DirectoryNotEmpty,
 }
 
 impl IntoResponse for Error {
@@ -17,6 +18,7 @@ impl IntoResponse for Error {
 			NotAFile => (StatusCode::CONFLICT, "Not A File").into_response(),
 			NotADirectory => (StatusCode::CONFLICT, "Not A Directory").into_response(),
 			AlreadyExists(location) => (StatusCode::CONFLICT, [(header::LOCATION, location)], "Already Exists").into_response(),
+			DirectoryNotEmpty => (StatusCode::CONFLICT, "Directory Not Empty").into_response(),
 		}
 	}
 }
