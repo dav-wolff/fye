@@ -20,12 +20,11 @@ pub trait ResponsePostcard {
 
 impl ResponsePostcard for Response {
 	async fn postcard<T: DeserializeOwned>(self) -> Result<T, Error> {
-		// TODO: set Content-Type on server and check for it here
-		// let content_type = self.headers().get(header::CONTENT_TYPE).ok_or(Error::ProtocolMismatch)?;
+		let content_type = self.headers().get(header::CONTENT_TYPE).ok_or(Error::ProtocolMismatch)?;
 		
-		// if content_type.as_bytes() != b"application/postcard" {
-		// 	return Err(Error::ProtocolMismatch);
-		// }
+		if content_type.as_bytes() != b"application/postcard" {
+			return Err(Error::ProtocolMismatch);
+		}
 		
 		let bytes = self.bytes().await.map_err(Error::network_error)?;
 		
