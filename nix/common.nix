@@ -2,6 +2,7 @@
 , craneLib
 , pkg-config
 , openssl
+, sqlite
 }:
 
 let
@@ -21,6 +22,7 @@ let
 		
 		buildInputs = [
 			openssl
+			sqlite
 		];
 	};
 in {

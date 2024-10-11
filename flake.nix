@@ -55,13 +55,18 @@
 			devShells.default = craneLib.devShell {
 				packages = with pkgs; [
 					rust-analyzer
+					diesel-cli
 					pkg-config
 					openssl
+					sqlite
 				];
 				
 				LD_LIBRARY_PATH = with pkgs; lib.makeLibraryPath [
 					openssl
+					sqlite
 				];
+				
+				DATABASE_URL = "dev_data/fye.db";
 			};
 		}
 	);

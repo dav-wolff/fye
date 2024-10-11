@@ -6,10 +6,10 @@ let
 	common = callPackage ./common.nix {
 		inherit craneLib;
 	};
-in craneLib.buildPackage {
-	inherit (common) version cargoArtifacts;
+in craneLib.buildPackage (common.args // {
+	inherit (common) cargoArtifacts;
 	
 	pname = "${common.pname}-server";
 	src = common.sourceFor ../server;
 	cargoExtraArgs = "-p fye_server";
-}
+})

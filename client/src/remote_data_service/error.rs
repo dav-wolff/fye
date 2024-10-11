@@ -39,7 +39,7 @@ pub async fn decode_errors(request: RequestBuilder, expected_status: StatusCode)
 	
 	Err(match response.status() {
 		StatusCode::BAD_GATEWAY => Error::NetworkFailure(NetworkError::Other),
-		StatusCode::INTERNAL_SERVER_ERROR => Error::ServerError,
+		StatusCode::INTERNAL_SERVER_ERROR | StatusCode::SERVICE_UNAVAILABLE => Error::ServerError, // TODO: should SERVICE_UNAVAILABLE be a different error?
 		StatusCode::NOT_FOUND => Error::NotFound,
 		StatusCode::CONFLICT => {
 			let body = response.bytes().await.map_err(Error::network_error)?;
