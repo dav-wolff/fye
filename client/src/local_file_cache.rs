@@ -56,13 +56,17 @@ impl LocalFileCache {
 	}
 	
 	pub fn write_file_data(&self, id: NodeID, offset: u64, data: Vec<u8>) -> impl Future<Output = Result<u32, FetchFileError>> {
-		let request = self.remote_data_service.write_file_data(id, offset, data);
+		// TODO: implement offsets
+		assert_eq!(offset, 0);
+		
+		let len = data.len();
+		let request = self.remote_data_service.write_file_data(id, data);
 		let local_cache = self.local_cache.clone();
 		
 		async move {
-			let bytes_written = request.await?;
+			request.await?;
 			local_cache.write().expect("poison").remove(&id);
-			Ok(bytes_written)
+			Ok(len as u32)
 		}
 	}
 	

@@ -153,6 +153,17 @@ impl File {
 		}
 	}
 	
+	pub fn set_size(conn: &mut SqliteConnection, node_id: NodeID, new_size: u64) -> Result<(), DieselError> {
+		use schema::files::dsl::*;
+		
+		diesel::update(files)
+			.filter(id.eq(node_id.0 as i64))
+			.set(size.eq(new_size as i64))
+			.execute(conn)?;
+		
+		Ok(())
+	}
+	
 	pub fn insert(&self, conn: &mut SqliteConnection) -> Result<(), DieselError> {
 		let inserted_rows = diesel::insert_into(files::table)
 			.values(self)

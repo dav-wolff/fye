@@ -1,19 +1,25 @@
 #![forbid(unsafe_code)]
 #![deny(non_snake_case)]
 
-use axum::{extract::{Path, State}, http::{header, HeaderMap, StatusCode}, routing::{get, post}, Router};
+use std::{io, path::PathBuf, sync::Arc};
+
+use axum::{body::Body, extract::{Path, Request, State}, http::{header, HeaderMap, StatusCode}, routing::{get, post}, Router};
 use axum_postcard::Postcard;
 use db::DirectoryEntry;
 use diesel::{connection::SimpleConnection, r2d2::{Pool, PooledConnection, R2D2Connection}, result::DatabaseErrorKind, Connection, OptionalExtension, RunQueryDsl, SqliteConnection};
+use futures::TryStreamExt;
 use fye_shared::{DirectoryInfo, FileInfo, NodeID, NodeInfo};
 use r2d2::ManageConnection;
-use tokio::net::TcpListener;
+use stream::{stream_to_file, TotalSizeStream};
+use tokio::{fs::File, net::TcpListener};
 use diesel::result::Error as DieselError;
 
 mod db;
+mod stream;
 
 mod error;
 use error::*;
+use tokio_util::io::ReaderStream;
 
 #[derive(Debug)]
 struct ConnectionManager(String);
@@ -48,8 +54,12 @@ async fn main() {
 		.test_on_check_out(true)
 		.build(db_manager).unwrap();
 	
+	let files_directory = PathBuf::from("dev_data/files");
+	std::fs::create_dir_all(&files_directory).unwrap();
+	
 	let app_state = AppState {
 		db_pool,
+		files_directory: files_directory.into(),
 	};
 	
 	let app = Router::new()
@@ -70,10 +80,11 @@ async fn main() {
 #[derive(Clone, Debug)]
 struct AppState {
 	db_pool: Pool<ConnectionManager>,
+	files_directory: Arc<std::path::Path>,
 }
 
 impl AppState {
-	async fn get_connection(&self) -> Result<PooledConnection<ConnectionManager>, r2d2::Error> {
+	async fn get_connection(&self) -> Result<PooledConnection<ConnectionManager>, Error> {
 		if let Some(connection) = self.db_pool.try_get() {
 			return Ok(connection);
 		}
@@ -81,13 +92,13 @@ impl AppState {
 		let db_pool = self.db_pool.clone();
 		
 		tokio::task::spawn_blocking(move || {
-			db_pool.get() // may block
+			db_pool.get().map_err(|_| Error::Database) // may block
 		}).await.expect("db_pool.get() should not panic")
 	}
 }
 
 async fn node_info(State(app_state): State<AppState>, Path(id): Path<NodeID>) -> Result<Postcard<NodeInfo>, Error> {
-	let conn = &mut app_state.get_connection().await.map_err(|_| Error::Database)?;
+	let conn = &mut app_state.get_connection().await?;
 	
 	if let Some(file) = db::File::get(id)
 		.first(conn)
@@ -124,7 +135,7 @@ async fn node_info(State(app_state): State<AppState>, Path(id): Path<NodeID>) ->
 }
 
 async fn dir_info(State(app_state): State<AppState>, Path(id): Path<NodeID>) -> Result<Postcard<DirectoryInfo>, Error> {
-	let conn = &mut app_state.get_connection().await.map_err(|_| Error::Database)?;
+	let conn = &mut app_state.get_connection().await?;
 	
 	let dir = db::Directory::get(id)
 		.first(conn).map_err(|err| match err {
@@ -159,7 +170,7 @@ async fn dir_info(State(app_state): State<AppState>, Path(id): Path<NodeID>) -> 
 }
 
 async fn file_info(State(app_state): State<AppState>, Path(id): Path<NodeID>) -> Result<Postcard<FileInfo>, Error> {
-	let conn = &mut app_state.get_connection().await.map_err(|_| Error::Database)?;
+	let conn = &mut app_state.get_connection().await?;
 	
 	let file = db::File::get(id)
 		.first(conn).map_err(|err| match err {
@@ -178,12 +189,44 @@ async fn file_info(State(app_state): State<AppState>, Path(id): Path<NodeID>) ->
 	}))
 }
 
-async fn file_data(State(_app_state): State<AppState>, Path(_id): Path<NodeID>) -> Result<Vec<u8>, Error> {
-	Ok(Vec::new())
+async fn file_data(State(app_state): State<AppState>, Path(id): Path<NodeID>) -> Result<Body, Error> {
+	let conn = &mut app_state.get_connection().await?;
+	
+	if !db::File::exists(conn, id).map_err(|_| Error::Database)? {
+		if db::Directory::exists(conn, id).map_err(|_| Error::Database)? {
+			return Err(Error::NotAFile);
+		} else {
+			return Err(Error::NotFound);
+		}
+	}
+	
+	let file = File::open(app_state.files_directory.join(id.0.to_string())).await.map_err(|_| Error::IO)?;
+	let stream = ReaderStream::new(file);
+	let body = Body::from_stream(stream);
+	
+	Ok(body)
 }
 
-async fn write_file_data(State(_app_state): State<AppState>, Path(_id): Path<NodeID>, Postcard((_offset, _data)): Postcard<(u64, Vec<u8>)>) -> Result<Postcard<u32>, Error> {
-	unimplemented!()
+async fn write_file_data(State(app_state): State<AppState>, Path(id): Path<NodeID>, request: Request) -> Result<(), Error> {
+	let conn = &mut app_state.get_connection().await?;
+	
+	if !db::File::exists(conn, id).map_err(|_| Error::Database)? {
+		if db::Directory::exists(conn, id).map_err(|_| Error::Database)? {
+			return Err(Error::NotAFile);
+		} else {
+			return Err(Error::NotFound);
+		}
+	}
+	
+	let file = File::create(app_state.files_directory.join(id.0.to_string())).await.map_err(|_| Error::IO)?;
+	let stream = request.into_body().into_data_stream();
+	let mut total_size_stream = TotalSizeStream::new(stream.map_err(io::Error::other));
+	
+	stream_to_file(file, &mut total_size_stream).await.map_err(|_| Error::IO)?;
+	
+	db::File::set_size(conn, id, total_size_stream.total_size()).map_err(|_| Error::Database)?;
+	
+	Ok(())
 }
 
 fn get_entry_url(conn: &mut SqliteConnection, parent_id: NodeID, name: &str) -> Result<String, Error> {
@@ -199,7 +242,7 @@ fn get_entry_url(conn: &mut SqliteConnection, parent_id: NodeID, name: &str) -> 
 }
 
 async fn create_dir(State(app_state): State<AppState>, Path(parent_id): Path<NodeID>, Postcard(name): Postcard<String>) -> Result<(StatusCode, HeaderMap), Error> {
-	let conn = &mut app_state.get_connection().await.map_err(|_| Error::Database)?;
+	let conn = &mut app_state.get_connection().await?;
 	
 	let id = transaction(conn, |conn| {
 		let id = db::next_available_id(conn).map_err(|_| Error::Database)?;
@@ -239,7 +282,7 @@ async fn create_dir(State(app_state): State<AppState>, Path(parent_id): Path<Nod
 }
 
 async fn create_file(State(app_state): State<AppState>, Path(parent_id): Path<NodeID>, Postcard(name): Postcard<String>) -> Result<(StatusCode, HeaderMap), Error> {
-	let conn = &mut app_state.get_connection().await.map_err(|_| Error::Database)?;
+	let conn = &mut app_state.get_connection().await?;
 	
 	let id = transaction(conn, |conn| {
 		let id = db::next_available_id(conn).map_err(|_| Error::Database)?;
@@ -279,7 +322,7 @@ async fn create_file(State(app_state): State<AppState>, Path(parent_id): Path<No
 }
 
 async fn delete_dir(State(app_state): State<AppState>, Path(parent_id): Path<NodeID>, Postcard(name): Postcard<String>) -> Result<StatusCode, Error> {
-	let conn = &mut app_state.get_connection().await.map_err(|_| Error::Database)?;
+	let conn = &mut app_state.get_connection().await?;
 	
 	transaction(conn, |conn| {
 		// TODO: this should be possible with one sql query
@@ -315,7 +358,7 @@ async fn delete_dir(State(app_state): State<AppState>, Path(parent_id): Path<Nod
 }
 
 async fn delete_file(State(app_state): State<AppState>, Path(parent_id): Path<NodeID>, Postcard(name): Postcard<String>) -> Result<StatusCode, Error> {
-	let conn = &mut app_state.get_connection().await.map_err(|_| Error::Database)?;
+	let conn = &mut app_state.get_connection().await?;
 	
 	transaction(conn, |conn| {
 		// TODO: this should be possible with one sql query

@@ -4,6 +4,7 @@ use diesel::{result::Error as DieselError, Connection, SqliteConnection};
 #[derive(Clone, Debug)]
 pub enum Error {
 	Database,
+	IO,
 	NotFound,
 	NotAFile,
 	NotADirectory,
@@ -17,6 +18,7 @@ impl IntoResponse for Error {
 		
 		match self {
 			Database => StatusCode::SERVICE_UNAVAILABLE.into_response(),
+			IO => StatusCode::INTERNAL_SERVER_ERROR.into_response(), // TODO: is there a more appropriate status code
 			NotFound => StatusCode::NOT_FOUND.into_response(),
 			NotAFile => (StatusCode::CONFLICT, "Not A File").into_response(),
 			NotADirectory => (StatusCode::CONFLICT, "Not A Directory").into_response(),

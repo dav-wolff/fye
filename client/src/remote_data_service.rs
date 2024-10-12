@@ -65,16 +65,14 @@ impl RemoteDataService {
 		}
 	}
 	
-	pub fn write_file_data(&self, id: NodeID, offset: u64, data: Vec<u8>) -> impl Future<Output = Result<u32, FetchFileError>> {
+	pub fn write_file_data(&self, id: NodeID, data: Vec<u8>) -> impl Future<Output = Result<(), FetchFileError>> {
 		let url = self.base_url.join(&format!("file/{id}/data")).expect("url should be valid");
 		let request = self.client.patch(url)
-			.postcard(&(offset, data));
+			.body(data);
 		
 		async {
-			let bytes_written = decode_errors(request, StatusCode::OK).await?
-				.postcard().await?;
-			
-			Ok(bytes_written)
+			decode_errors(request, StatusCode::OK).await?;
+			Ok(())
 		}
 	}
 	
