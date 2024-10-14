@@ -1,5 +1,7 @@
-{ callPackage
+{ lib
+, callPackage
 , craneLib
+, openssl
 }:
 
 let
@@ -10,5 +12,12 @@ in craneLib.buildPackage (common.args // {
 	inherit (common) cargoArtifacts;
 	
 	src = common.sourceFor ../client;
-	cargoExtraArgs = "-p fye_client";
+	cargoExtraArgs = "--bin fye";
+	
+	postFixup = ''
+		wrapProgram $out/bin/${common.pname} \
+			--set LD_LIBRARY_PATH ${lib.makeLibraryPath [
+				openssl
+			]}
+	'';
 })

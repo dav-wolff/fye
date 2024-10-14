@@ -1,6 +1,7 @@
 { lib
 , craneLib
 , pkg-config
+, makeWrapper
 , openssl
 , sqlite
 }:
@@ -12,12 +13,14 @@ let
 	};
 	
 	nameVersion = craneLib.crateNameFromCargoToml { inherit src; };
+	inherit (nameVersion) pname version;
 	
 	args = {
 		inherit (nameVersion) pname version;
 		
 		nativeBuildInputs = [
 			pkg-config
+			makeWrapper
 		];
 		
 		buildInputs = [
@@ -26,8 +29,7 @@ let
 		];
 	};
 in {
-	inherit (nameVersion) pname version;
-	inherit args;
+	inherit pname version args;
 	
 	cargoArtifacts = craneLib.buildDepsOnly (args // {
 		inherit src;
