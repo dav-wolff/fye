@@ -1,12 +1,10 @@
-#![feature(try_trait_v2)]
+#![feature(async_closure)]
 #![forbid(unsafe_code)]
 #![deny(non_snake_case)]
 
 use std::{io, path::Path};
 use reqwest::Url;
 use tokio::runtime::Runtime;
-
-mod maybe_async;
 
 mod remote_data_service;
 mod local_file_cache;

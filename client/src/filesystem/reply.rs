@@ -2,8 +2,6 @@ use std::{future::Future, time::Duration};
 
 use fuser::{FileAttr, FileType, ReplyAttr, ReplyCreate, ReplyData, ReplyDirectory, ReplyEmpty, ReplyEntry, ReplyWrite};
 
-use crate::maybe_async::MaybeAsync;
-
 #[derive(Debug)]
 pub enum Error {
 	NoEnt,
@@ -40,26 +38,18 @@ impl From<Error> for i32 {
 	}
 }
 
-pub fn respond<T, F, R, C>(reply: R, f: C)
+pub fn respond<T, R, F, C>(reply: R, callback: C)
 where
 	R: Reply<T> + Send + 'static,
-	F: Future<Output = Result<T, Error>> + Send + 'static,
-	C: FnOnce() -> MaybeAsync<Result<T, Error>, F>,
+	F: Future<Output = Result<T, Error>> + Send,
+	C: FnOnce() -> F + Send + 'static,
 {
-	let resolve = |result| match result {
-		Ok(val) => reply.ok(val),
-		Err(err) => reply.error(err),
-	};
-	
-	match f() {
-		MaybeAsync::Sync(result) => resolve(result),
-		MaybeAsync::Async(future) => {
-			tokio::spawn(async {
-				let result = future.await;
-				resolve(result);
-			});
-		},
-	}
+	tokio::spawn(async {
+		match callback().await {
+			Ok(val) => reply.ok(val),
+			Err(err) => reply.error(err),
+		}
+	});
 }
 
 pub trait Reply<T> {
