@@ -1,6 +1,6 @@
 use std::{collections::HashMap, future::Future, sync::{Arc, RwLock}};
 
-use crate::{maybe_async::MaybeAsync, remote_data_service::{CreateNodeError, DeleteDirectoryError, DeleteFileError, FetchDirectoryError, FetchFileError}};
+use crate::{maybe_async::MaybeAsync, remote_data_service::{CreateNodeError, DeleteDirectoryError, DeleteFileError, FetchDirectoryError, FetchFileError, WriteFileError}};
 use bytes::Bytes;
 use fye_shared::{DirectoryInfo, FileInfo, NodeID, NodeInfo};
 
@@ -52,15 +52,38 @@ impl LocalFileCache {
 	}
 	
 	pub fn get_file_data(&self, id: NodeID) -> MaybeAsync!(Result<Bytes, FetchFileError>) {
-		Async(self.remote_data_service.fetch_file_data(id))
+		let request = self.remote_data_service.fetch_file_data(id);
+		let local_cache = self.local_cache.clone();
+		
+		Async(async move {
+			let (hash, data) = request.await?;
+			local_cache.write().expect("poison").insert(id, NodeInfo::File(FileInfo {
+				size: data.len() as u64,
+				hash,
+			}));
+			
+			Ok(data)
+		})
 	}
 	
-	pub fn write_file_data(&self, id: NodeID, offset: u64, data: Vec<u8>) -> impl Future<Output = Result<u32, FetchFileError>> {
+	pub fn write_file_data(&self, id: NodeID, offset: u64, data: Vec<u8>) -> impl Future<Output = Result<u32, WriteFileError>> {
 		// TODO: implement offsets
 		assert_eq!(offset, 0);
 		
 		let len = data.len();
-		let request = self.remote_data_service.write_file_data(id, data);
+		
+		let hash = {
+			let cache = self.local_cache.read().expect("poison");
+			cache.get(&id).and_then(|node| match node {
+				NodeInfo::File(file_info) => Some(file_info.hash.clone()), // TODO: is clone necessary?
+				NodeInfo::Directory(_) => None,
+			})
+		};
+		
+		// TODO: what to do when hash isn't available?
+		let hash = hash.unwrap();
+		
+		let request = self.remote_data_service.write_file_data(id, &hash, data);
 		let local_cache = self.local_cache.clone();
 		
 		async move {
@@ -93,10 +116,13 @@ impl LocalFileCache {
 		let local_cache = self.local_cache.clone();
 		
 		async move {
-			let id = request.await?;
+			let (id, hash) = request.await?;
 			
 			let mut local_cache = local_cache.write().expect("poison");
-			local_cache.insert(id, NodeInfo::File(FileInfo::default()));
+			local_cache.insert(id, NodeInfo::File(FileInfo {
+				size: 0,
+				hash,
+			}));
 			
 			if let Some(NodeInfo::Directory(parent_info)) = local_cache.get_mut(&parent_id) {
 				parent_info.children.insert(name, id);

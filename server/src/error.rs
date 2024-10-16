@@ -1,8 +1,10 @@
 use axum::{http::{header, StatusCode}, response::{IntoResponse, Response}};
-use diesel::{result::Error as DieselError, Connection, SqliteConnection};
+use diesel::{connection::{AnsiTransactionManager, TransactionManager}, result::Error as DieselError, Connection, SqliteConnection};
 
 #[derive(Clone, Debug)]
 pub enum Error {
+	BadRequest,
+	HashMissing,
 	Database,
 	IO,
 	NotFound,
@@ -10,6 +12,8 @@ pub enum Error {
 	NotADirectory,
 	AlreadyExists(String),
 	DirectoryNotEmpty,
+	Modified,
+	NotModified,
 }
 
 impl IntoResponse for Error {
@@ -17,6 +21,8 @@ impl IntoResponse for Error {
 		use Error::*;
 		
 		match self {
+			BadRequest => StatusCode::BAD_REQUEST.into_response(),
+			HashMissing => StatusCode::PRECONDITION_REQUIRED.into_response(),
 			Database => StatusCode::SERVICE_UNAVAILABLE.into_response(),
 			IO => StatusCode::INTERNAL_SERVER_ERROR.into_response(), // TODO: is there a more appropriate status code
 			NotFound => StatusCode::NOT_FOUND.into_response(),
@@ -24,6 +30,8 @@ impl IntoResponse for Error {
 			NotADirectory => (StatusCode::CONFLICT, "Not A Directory").into_response(),
 			AlreadyExists(location) => (StatusCode::CONFLICT, [(header::LOCATION, location)], "Already Exists").into_response(),
 			DirectoryNotEmpty => (StatusCode::CONFLICT, "Directory Not Empty").into_response(),
+			Modified => StatusCode::PRECONDITION_FAILED.into_response(),
+			NotModified => StatusCode::NOT_MODIFIED.into_response(),
 		}
 	}
 }
@@ -32,10 +40,32 @@ impl IntoResponse for Error {
 /// that the error type implements [`From`]<[`diesel::result::Error`]>.
 /// 
 /// Converts all errors arising from the transaction itself to a [`Error::DbError`].
-pub fn transaction<T>(conn: &mut SqliteConnection, callback: impl FnOnce(&mut SqliteConnection) -> Result<T, Error>) -> Result<T, Error> {
+pub fn transaction<T, C>(conn: &mut SqliteConnection, callback: C) -> Result<T, Error>
+where
+	C: FnOnce(&mut SqliteConnection) -> Result<T, Error>,
+{
 	Ok(conn.transaction(|conn| -> Result<T, TransactionError> {
 		Ok(callback(conn)?)
 	})?)
+}
+
+// TODO: not cancel-safe
+pub async fn async_transaction<T, C>(conn: &mut SqliteConnection, callback: C) -> Result<T, Error>
+where
+	C: async FnOnce(&mut SqliteConnection) -> Result<T, Error>,
+{
+	AnsiTransactionManager::begin_transaction(conn).map_err(|_| Error::Database)?;
+	
+	match callback(conn).await {
+		Ok(result) => {
+			AnsiTransactionManager::commit_transaction(conn).map_err(|_| Error::Database)?;
+			Ok(result)
+		},
+		Err(error) => match AnsiTransactionManager::rollback_transaction(conn) {
+			Ok(()) | Err(DieselError::BrokenTransactionManager) => Err(error),
+			Err(_) => Err(Error::Database),
+		}
+	}
 }
 
 /// Helper type that is useful because diesel's [`Connection::transaction`][`diesel::connection::Connection::transaction`] requires

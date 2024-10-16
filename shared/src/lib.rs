@@ -3,6 +3,7 @@
 
 use std::{collections::BTreeMap, fmt::Display, num::ParseIntError, str::FromStr};
 
+use http::HeaderValue;
 use serde::{Deserialize, Serialize};
 
 #[derive(Serialize, Deserialize, PartialEq, Eq, Hash, Clone, Copy, Debug)]
@@ -53,9 +54,33 @@ impl DirectoryInfo {
 	}
 }
 
-#[derive(Serialize, Deserialize, Default, PartialEq, Eq, Clone, Debug)]
+#[derive(Serialize, Deserialize, PartialEq, Eq, Clone, Debug)]
+pub struct Hash(pub String);
+
+impl Hash {
+	pub fn parse_header(header: &HeaderValue) -> Option<&str> {
+		let str = header.to_str().ok()?;
+		
+		let str = str.strip_prefix('"')?
+			.strip_suffix('"')?;
+		
+		Some(str)
+	}
+	
+	pub fn from_header(header: &HeaderValue) -> Option<Self> {
+		Some(Self(Self::parse_header(header)?.to_owned()))
+	}
+	
+	pub fn to_header(&self) -> HeaderValue {
+		format!("\"{}\"", self.0)
+			.parse().expect("should be a valid header value")
+	}
+}
+
+#[derive(Serialize, Deserialize, PartialEq, Eq, Clone, Debug)]
 pub struct FileInfo {
 	pub size: u64,
+	pub hash: Hash,
 }
 
 #[derive(Serialize, Deserialize, PartialEq, Eq, Clone, Debug)]

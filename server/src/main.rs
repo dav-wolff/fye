@@ -1,3 +1,4 @@
+#![feature(async_closure)]
 #![forbid(unsafe_code)]
 #![deny(non_snake_case)]
 
@@ -8,12 +9,14 @@ use axum_postcard::Postcard;
 use db::DirectoryEntry;
 use diesel::{connection::SimpleConnection, r2d2::{Pool, PooledConnection, R2D2Connection}, result::DatabaseErrorKind, Connection, OptionalExtension, RunQueryDsl, SqliteConnection};
 use futures::TryStreamExt;
-use fye_shared::{DirectoryInfo, FileInfo, NodeID, NodeInfo};
+use fye_shared::{DirectoryInfo, FileInfo, NodeID, NodeInfo, Hash};
+use hash::EMPTY_HASH;
 use r2d2::ManageConnection;
-use stream::{stream_to_file, TotalSizeStream};
-use tokio::{fs::File, net::TcpListener};
+use stream::{stream_to_file, HashStream};
+use tokio::{fs::{self, File, OpenOptions}, net::TcpListener};
 use diesel::result::Error as DieselError;
 
+mod hash;
 mod db;
 mod stream;
 
@@ -54,11 +57,15 @@ async fn main() {
 		.test_on_check_out(true)
 		.build(db_manager).unwrap();
 	
+	let uploads_directory = PathBuf::from("dev_data/uploads");
+	std::fs::create_dir_all(&uploads_directory).unwrap();
+	
 	let files_directory = PathBuf::from("dev_data/files");
 	std::fs::create_dir_all(&files_directory).unwrap();
 	
 	let app_state = AppState {
 		db_pool,
+		uploads_directory: uploads_directory.into(),
 		files_directory: files_directory.into(),
 	};
 	
@@ -70,7 +77,7 @@ async fn main() {
 		.route("/api/dir/:id/delete-dir", post(delete_dir))
 		.route("/api/dir/:id/delete-file", post(delete_file))
 		.route("/api/file/:id", get(file_info))
-		.route("/api/file/:id/data", get(file_data).patch(write_file_data))
+		.route("/api/file/:id/data", get(file_data).put(write_file_data))
 		.with_state(app_state);
 	
 	let listener = TcpListener::bind("0.0.0.0:3000").await.unwrap();
@@ -80,6 +87,7 @@ async fn main() {
 #[derive(Clone, Debug)]
 struct AppState {
 	db_pool: Pool<ConnectionManager>,
+	uploads_directory: Arc<std::path::Path>,
 	files_directory: Arc<std::path::Path>,
 }
 
@@ -106,6 +114,7 @@ async fn node_info(State(app_state): State<AppState>, Path(id): Path<NodeID>) ->
 	{
 		Ok(Postcard(NodeInfo::File(FileInfo {
 			size: file.size as u64,
+			hash: Hash(file.hash),
 		})))
 	} else if let Some(dir) = db::Directory::get(id)
 		.first(conn)
@@ -169,10 +178,8 @@ async fn dir_info(State(app_state): State<AppState>, Path(id): Path<NodeID>) -> 
 	}))
 }
 
-async fn file_info(State(app_state): State<AppState>, Path(id): Path<NodeID>) -> Result<Postcard<FileInfo>, Error> {
-	let conn = &mut app_state.get_connection().await?;
-	
-	let file = db::File::get(id)
+fn get_file_info(conn: &mut SqliteConnection, id: NodeID) -> Result<db::File, Error> {
+	db::File::get(id)
 		.first(conn).map_err(|err| match err {
 			DieselError::NotFound => {
 				match db::Directory::exists(conn, id) {
@@ -182,51 +189,96 @@ async fn file_info(State(app_state): State<AppState>, Path(id): Path<NodeID>) ->
 				}
 			},
 			_ => Error::Database, // TODO: what to do about unexpected error types?
-		})?;
+		})
+}
+
+async fn file_info(State(app_state): State<AppState>, Path(id): Path<NodeID>) -> Result<Postcard<FileInfo>, Error> {
+	let conn = &mut app_state.get_connection().await?;
+	
+	let file_info = get_file_info(conn, id)?;
 	
 	Ok(Postcard(FileInfo {
-		size: file.size as u64,
+		size: file_info.size as u64,
+		hash: Hash(file_info.hash),
 	}))
 }
 
-async fn file_data(State(app_state): State<AppState>, Path(id): Path<NodeID>) -> Result<Body, Error> {
+async fn file_data(State(app_state): State<AppState>, Path(id): Path<NodeID>, headers: HeaderMap) -> Result<(HeaderMap, Body), Error> {
 	let conn = &mut app_state.get_connection().await?;
 	
-	if !db::File::exists(conn, id).map_err(|_| Error::Database)? {
-		if db::Directory::exists(conn, id).map_err(|_| Error::Database)? {
-			return Err(Error::NotAFile);
-		} else {
-			return Err(Error::NotFound);
-		}
+	let if_match = headers.get(header::IF_MATCH)
+		.map(|header| Hash::parse_header(header).ok_or(Error::BadRequest))
+		.transpose()?;
+	let none_match = headers.get(header::IF_NONE_MATCH)
+		.map(|header| Hash::parse_header(header).ok_or(Error::BadRequest))
+		.transpose()?;
+	
+	let file_info = get_file_info(conn, id)?;
+	
+	if if_match.is_some_and(|hash| hash != file_info.hash) {
+		return Err(Error::Modified);
 	}
 	
-	let file = File::open(app_state.files_directory.join(id.0.to_string())).await.map_err(|_| Error::IO)?;
+	if none_match.is_some_and(|hash| hash == file_info.hash) {
+		return Err(Error::NotModified);
+	}
+	
+	let mut headers = HeaderMap::new();
+	headers.insert(header::ETAG, Hash(file_info.hash.clone()).to_header()); // TODO: avoid clone
+	
+	if file_info.hash == EMPTY_HASH {
+		return Ok((headers, Body::empty()));
+	}
+	
+	let file = File::open(app_state.files_directory.join(&file_info.hash)).await.map_err(|_| Error::IO)?;
 	let stream = ReaderStream::new(file);
 	let body = Body::from_stream(stream);
 	
-	Ok(body)
+	Ok((headers, body))
 }
 
-async fn write_file_data(State(app_state): State<AppState>, Path(id): Path<NodeID>, request: Request) -> Result<(), Error> {
+async fn write_file_data(State(app_state): State<AppState>, Path(id): Path<NodeID>, request: Request) -> Result<StatusCode, Error> {
+	// TODO: delete upload file in case of error
+	
 	let conn = &mut app_state.get_connection().await?;
 	
-	if !db::File::exists(conn, id).map_err(|_| Error::Database)? {
-		if db::Directory::exists(conn, id).map_err(|_| Error::Database)? {
-			return Err(Error::NotAFile);
-		} else {
-			return Err(Error::NotFound);
-		}
+	let prev_hash = Hash::from_header(request.headers().get(header::IF_MATCH).ok_or(Error::HashMissing)?).ok_or(Error::BadRequest)?;
+	
+	let file_info = get_file_info(conn, id)?;
+	
+	if prev_hash != Hash(file_info.hash) {
+		return Err(Error::Modified);
 	}
 	
-	let file = File::create(app_state.files_directory.join(id.0.to_string())).await.map_err(|_| Error::IO)?;
+	let upload_location = app_state.uploads_directory.join(id.0.to_string());
+	let file = OpenOptions::new()
+		.write(true)
+		.create_new(true)
+		.open(&upload_location).await
+		.map_err(|_| Error::IO)?; // TODO: handle case of file already existing
+	
 	let stream = request.into_body().into_data_stream();
-	let mut total_size_stream = TotalSizeStream::new(stream.map_err(io::Error::other));
+	let mut hash_stream = HashStream::new(stream.map_err(io::Error::other));
+	stream_to_file(file, &mut hash_stream).await.map_err(|_| Error::IO)?;
 	
-	stream_to_file(file, &mut total_size_stream).await.map_err(|_| Error::IO)?;
+	let hash = hash_stream.hash().to_hex();
+	let total_size = hash_stream.total_size();
 	
-	db::File::set_size(conn, id, total_size_stream.total_size()).map_err(|_| Error::Database)?;
+	async_transaction(conn, async |conn| {
+		let found = db::File::update_content(conn, id, &prev_hash.0, &hash, total_size)
+			.map_err(|_| Error::Database)?;
+		
+		if !found {
+			return Err(Error::Modified);
+		}
+		
+		// part of the transaction, so updating the hash gets rolled back if the move fails
+		fs::rename(upload_location, app_state.files_directory.join(hash.as_str())).await.map_err(|_| Error::IO)?;
+		
+		Ok(())
+	}).await?;
 	
-	Ok(())
+	Ok(StatusCode::NO_CONTENT)
 }
 
 fn get_entry_url(conn: &mut SqliteConnection, parent_id: NodeID, name: &str) -> Result<String, Error> {
@@ -290,6 +342,7 @@ async fn create_file(State(app_state): State<AppState>, Path(parent_id): Path<No
 		let file = db::File {
 			id: id.0 as i64,
 			size: 0,
+			hash: EMPTY_HASH.to_owned(), // TODO: avoid allocation
 		};
 		
 		file.insert(conn).map_err(|_| Error::Database)?;
@@ -317,6 +370,7 @@ async fn create_file(State(app_state): State<AppState>, Path(parent_id): Path<No
 	
 	let mut headers = HeaderMap::new();
 	headers.insert(header::LOCATION, format!("/api/file/{id}").parse().expect("should be a valid header value"));
+	headers.insert(header::ETAG, Hash(EMPTY_HASH.to_owned()).to_header()); // TODO: avoid unnecessary allocation
 	
 	Ok((StatusCode::CREATED, headers))
 }
@@ -381,10 +435,10 @@ async fn delete_file(State(app_state): State<AppState>, Path(parent_id): Path<No
 			_ => panic!("should be impossible due to the check on the directory_entries table"),
 		};
 		
-		if db::Directory::delete(conn, NodeID(id as u64)).map_err(|_| Error::Database)? {
+		if db::File::delete(conn, NodeID(id as u64)).map_err(|_| Error::Database)? {
 			Ok(())
 		} else {
-			panic!("should be impossible as the foreign key constraint on the directory_entries table means the directory must exist");
+			panic!("should be impossible as the foreign key constraint on the directory_entries table means the file must exist");
 		}
 	})?;
 	

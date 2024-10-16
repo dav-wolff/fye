@@ -9,6 +9,7 @@ authors = ["David Wolff"]
 [workspace.dependencies]
 fye_shared = { path = "./shared", version = "0.1.0-wip" }
 serde = { version = "1.0", features = ["derive"] }
+http = "1.1"
 
 [workspace.metadata.crane]
 name = "fye"

@@ -10,7 +10,7 @@ pub enum NetworkError {
 }
 
 #[derive(Debug)]
-pub enum Error {
+pub(super) enum Error {
 	NetworkFailure(NetworkError),
 	ServerError,
 	ProtocolMismatch,
@@ -19,6 +19,8 @@ pub enum Error {
 	NotADirectory,
 	AlreadyExists,
 	DirectoryNotEmpty,
+	Modified,
+	NotModified,
 }
 
 impl Error {
@@ -30,7 +32,7 @@ impl Error {
 	}
 }
 
-pub async fn decode_errors(request: RequestBuilder, expected_status: StatusCode) -> Result<Response, Error> {
+pub(super) async fn decode_errors(request: RequestBuilder, expected_status: StatusCode) -> Result<Response, Error> {
 	let response = request.send().await.map_err(Error::network_error)?;
 	
 	if response.status() == expected_status {
@@ -52,6 +54,8 @@ pub async fn decode_errors(request: RequestBuilder, expected_status: StatusCode)
 				_ => Error::ProtocolMismatch,
 			}
 		},
+		StatusCode::PRECONDITION_FAILED => Error::Modified,
+		StatusCode::NOT_MODIFIED => Error::NotModified,
 		_ => Error::ProtocolMismatch,
 	})
 }
@@ -118,6 +122,31 @@ impl From<Error> for FetchFileError {
 			ServerError => Self::ServerError,
 			NotFound => Self::NotFound,
 			NotAFile => Self::NotAFile,
+			ProtocolMismatch | _ => Self::ProtocolMismatch,
+		}
+	}
+}
+
+#[derive(Debug)]
+pub enum WriteFileError {
+	NetworkFailure(NetworkError),
+	ServerError,
+	ProtocolMismatch,
+	NotFound,
+	NotAFile,
+	Modified,
+}
+
+impl From<Error> for WriteFileError {
+	fn from(value: Error) -> Self {
+		use Error::*;
+		
+		match value {
+			NetworkFailure(err) => Self::NetworkFailure(err),
+			ServerError => Self::ServerError,
+			NotFound => Self::NotFound,
+			NotAFile => Self::NotAFile,
+			Modified => Self::Modified,
 			ProtocolMismatch | _ => Self::ProtocolMismatch,
 		}
 	}

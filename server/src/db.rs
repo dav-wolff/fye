@@ -26,6 +26,7 @@ pub struct Directory {
 pub struct File {
 	pub id: i64,
 	pub size: i64,
+	pub hash: String,
 }
 
 #[derive(Queryable, Selectable, Debug)]
@@ -153,15 +154,32 @@ impl File {
 		}
 	}
 	
-	pub fn set_size(conn: &mut SqliteConnection, node_id: NodeID, new_size: u64) -> Result<(), DieselError> {
+	pub fn has_hash(conn: &mut SqliteConnection, node_id: NodeID, expected_hash: &str) -> Result<bool, DieselError> {
 		use schema::files::dsl::*;
 		
-		diesel::update(files)
-			.filter(id.eq(node_id.0 as i64))
-			.set(size.eq(new_size as i64))
+		let result = files.filter(id.eq(node_id.0 as i64).and(hash.eq(expected_hash)))
+			.select(File::as_select())
+			.first(conn);
+		
+		match result {
+			Ok(_) => Ok(true),
+			Err(DieselError::NotFound) => Ok(false),
+			Err(err) => Err(err),
+		}
+	}
+	
+	pub fn update_content(conn: &mut SqliteConnection, node_id: NodeID, prev_hash: &str, new_hash: &str, new_size: u64) -> Result<bool, DieselError> {
+		use schema::files::dsl::*;
+		
+		let rows_updated = diesel::update(files)
+			.filter(id.eq(node_id.0 as i64).and(hash.eq(prev_hash)))
+			.set((
+				hash.eq(new_hash),
+				size.eq(new_size as i64)
+			))
 			.execute(conn)?;
 		
-		Ok(())
+		Ok(rows_updated > 0)
 	}
 	
 	pub fn insert(&self, conn: &mut SqliteConnection) -> Result<(), DieselError> {
@@ -171,6 +189,16 @@ impl File {
 		assert_eq!(inserted_rows, 1);
 		
 		Ok(())
+	}
+	
+	pub fn delete(conn: &mut SqliteConnection, node_id: NodeID) -> Result<bool, DieselError> {
+		use schema::files::dsl::*;
+		
+		let deleted_rows = diesel::delete(files.filter(id.eq(node_id.0 as i64)))
+			.execute(conn)?;
+		assert!(deleted_rows <= 1);
+		
+		Ok(deleted_rows == 1)
 	}
 }
 

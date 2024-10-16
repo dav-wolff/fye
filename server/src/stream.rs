@@ -1,9 +1,10 @@
 use std::{future::Future, io, pin::Pin, task::{Context, Poll}};
 
+use blake3::{Hash, Hasher};
 use bytes::Bytes;
 use futures::Stream;
 use tokio::{fs::File, io::AsyncWrite};
-use pin_project_lite::pin_project;
+use pin_project::pin_project;
 
 pub fn stream_to_file<S: Stream<Item = Result<Bytes, io::Error>>>(file: File, stream: S) -> impl Future<Output = Result<(), io::Error>> {
 	StreamToFile {
@@ -13,21 +14,20 @@ pub fn stream_to_file<S: Stream<Item = Result<Bytes, io::Error>>>(file: File, st
 	}
 }
 
-pin_project! {
-	struct StreamToFile<S: Stream<Item = Result<Bytes, io::Error>>> {
-		#[pin]
-		stream: S,
-		#[pin]
-		file: File,
-		current_bytes: Bytes,
-	}
+#[pin_project]
+struct StreamToFile<S: Stream<Item = Result<Bytes, io::Error>>> {
+	#[pin]
+	stream: S,
+	#[pin]
+	file: File,
+	current_bytes: Bytes,
 }
 
 impl<S: Stream<Item = Result<Bytes, io::Error>>> StreamToFile<S> {
 	fn write_current_bytes(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Result<(), io::Error>> {
 		let this = self.project();
-		let mut file: Pin<&mut File> = this.file;
-		let current_bytes: &mut Bytes = this.current_bytes;
+		let mut file = this.file;
+		let current_bytes = this.current_bytes;
 		
 		loop {
 			if current_bytes.is_empty() {
@@ -57,8 +57,8 @@ impl<S: Stream<Item = Result<Bytes, io::Error>>> Future for StreamToFile<S> {
 			}
 			
 			let this = self.as_mut().project();
-			let mut stream: Pin<&mut S> = this.stream;
-			let current_bytes: &mut Bytes = this.current_bytes;
+			let mut stream = this.stream;
+			let current_bytes = this.current_bytes;
 			
 			*current_bytes = match stream.as_mut().poll_next(cx) {
 				Poll::Pending => return Poll::Pending,
@@ -70,38 +70,41 @@ impl<S: Stream<Item = Result<Bytes, io::Error>>> Future for StreamToFile<S> {
 	}
 }
 
-pin_project! {
-	pub struct TotalSizeStream<S: Stream<Item = Result<Bytes, io::Error>>> {
-		#[pin]
-		inner: S,
-		total_size: u64,
-	}
+#[pin_project]
+pub struct HashStream<S: Stream<Item = Result<Bytes, io::Error>>> {
+	#[pin]
+	inner: S,
+	hasher: Hasher,
 }
 
-impl<S: Stream<Item = Result<Bytes, io::Error>>> TotalSizeStream<S> {
+impl<S: Stream<Item = Result<Bytes, io::Error>>> HashStream<S> {
 	pub fn new(stream: S) -> Self {
 		Self {
 			inner: stream,
-			total_size: 0,
+			hasher: Hasher::new(),
 		}
 	}
 	
 	pub fn total_size(&self) -> u64 {
-		self.total_size
+		self.hasher.count()
+	}
+	
+	pub fn hash(&self) -> Hash {
+		self.hasher.finalize()
 	}
 }
 
-impl<S: Stream<Item = Result<Bytes, io::Error>>> Stream for TotalSizeStream<S> {
+impl<S: Stream<Item = Result<Bytes, io::Error>>> Stream for HashStream<S> {
 	type Item = Result<Bytes, io::Error>;
 	
 	fn poll_next(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Option<Self::Item>> {
 		let this = self.project();
 		let inner = this.inner;
-		let total_size = this.total_size;
+		let hasher = this.hasher;
 		
 		match inner.poll_next(cx) {
 			Poll::Ready(Some(Ok(bytes))) => {
-				*total_size += bytes.len() as u64;
+				hasher.update(&bytes);
 				Poll::Ready(Some(Ok(bytes)))
 			},
 			result => result,

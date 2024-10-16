@@ -4,7 +4,7 @@ use fuser::{FileAttr, FileType, Filesystem, ReplyAttr, ReplyCreate, ReplyData, R
 use futures_util::{stream::FuturesOrdered, StreamExt};
 use fye_shared::{DirectoryInfo, NodeID, NodeInfo};
 
-use crate::{local_file_cache::LocalFileCache, maybe_async::MaybeAsync::{self, Async, Sync}, remote_data_service::{CreateNodeError, DeleteDirectoryError, DeleteFileError, FetchDirectoryError, FetchFileError, FetchNodeError, NetworkError}, MaybeAsync};
+use crate::{local_file_cache::LocalFileCache, maybe_async::MaybeAsync::{self, Async, Sync}, remote_data_service::{CreateNodeError, DeleteDirectoryError, DeleteFileError, FetchDirectoryError, FetchFileError, FetchNodeError, NetworkError, WriteFileError}, MaybeAsync};
 
 mod reply;
 use reply::*;
@@ -429,11 +429,12 @@ impl Filesystem for FyeFilesystem {
 			Async(async move {
 				this.local_file_cache.write_file_data(NodeID(ino), offset.try_into().unwrap(), data).await
 					.map_err(|err| match err {
-						FetchFileError::NetworkFailure(NetworkError::Timeout) => Error::TimedOut,
-						FetchFileError::NetworkFailure(NetworkError::Other) => Error::NoLink,
-						FetchFileError::ServerError | FetchFileError::ProtocolMismatch => Error::IO,
-						FetchFileError::NotFound => Error::NoEnt,
-						FetchFileError::NotAFile => Error::IsDir,
+						WriteFileError::NetworkFailure(NetworkError::Timeout) => Error::TimedOut,
+						WriteFileError::NetworkFailure(NetworkError::Other) => Error::NoLink,
+						WriteFileError::ServerError | WriteFileError::ProtocolMismatch => Error::IO,
+						WriteFileError::NotFound => Error::NoEnt,
+						WriteFileError::NotAFile => Error::IsDir,
+						WriteFileError::Modified => todo!("What to do?"),
 					})
 			})
 		})

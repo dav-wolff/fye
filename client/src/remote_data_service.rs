@@ -1,12 +1,11 @@
 use std::future::Future;
 
 use bytes::Bytes;
-use fye_shared::{DirectoryInfo, NodeID, NodeInfo};
+use fye_shared::{DirectoryInfo, Hash, NodeID, NodeInfo};
 use reqwest::{header, Client, StatusCode, Url};
 
 mod error;
-use error::*;
-pub use error::{NetworkError, FetchNodeError, FetchDirectoryError, FetchFileError, CreateNodeError, DeleteDirectoryError, DeleteFileError};
+pub use error::*;
 
 mod reqwest_postcard;
 use reqwest_postcard::*;
@@ -53,25 +52,29 @@ impl RemoteDataService {
 		}
 	}
 	
-	pub fn fetch_file_data(&self, id: NodeID) -> impl Future<Output = Result<Bytes, FetchFileError>> {
+	pub fn fetch_file_data(&self, id: NodeID) -> impl Future<Output = Result<(Hash, Bytes), FetchFileError>> {
 		let url = self.base_url.join(&format!("file/{id}/data")).expect("url should be valid");
 		let request = self.client.get(url);
 		
 		async {
-			let data = decode_errors(request, StatusCode::OK).await?
-				.bytes().await.map_err(Error::network_error)?;
+			let response = decode_errors(request, StatusCode::OK).await?;
+			let hash = Hash::from_header(
+				response.headers().get(header::ETAG).ok_or(FetchFileError::ProtocolMismatch)?
+			).ok_or(FetchFileError::ProtocolMismatch)?;
+			let data = response.bytes().await.map_err(Error::network_error)?;
 			
-			Ok(data)
+			Ok((hash, data))
 		}
 	}
 	
-	pub fn write_file_data(&self, id: NodeID, data: Vec<u8>) -> impl Future<Output = Result<(), FetchFileError>> {
+	pub fn write_file_data(&self, id: NodeID, expected_hash: &Hash, data: Vec<u8>) -> impl Future<Output = Result<(), WriteFileError>> {
 		let url = self.base_url.join(&format!("file/{id}/data")).expect("url should be valid");
-		let request = self.client.patch(url)
+		let request = self.client.put(url)
+			.header(header::IF_MATCH, expected_hash.to_header())
 			.body(data);
 		
 		async {
-			decode_errors(request, StatusCode::OK).await?;
+			decode_errors(request, StatusCode::NO_CONTENT).await?;
 			Ok(())
 		}
 	}
@@ -93,20 +96,25 @@ impl RemoteDataService {
 		}
 	}
 	
-	pub fn create_file(&self, parent_id: NodeID, name: &str) -> impl Future<Output = Result<NodeID, CreateNodeError>> {
+	pub fn create_file(&self, parent_id: NodeID, name: &str) -> impl Future<Output = Result<(NodeID, Hash), CreateNodeError>> {
 		let url = self.base_url.join(&format!("dir/{parent_id}/new-file")).expect("url should be valid");
 		let request = self.client.post(url)
 			.postcard(name); // &str and String are serialized the same
 		
 		async {
 			let response = decode_errors(request, StatusCode::CREATED).await?;
-			let location = response.headers().get(header::LOCATION).ok_or(CreateNodeError::ProtocolMismatch)?
+			let headers = response.headers();
+			let location = headers.get(header::LOCATION).ok_or(CreateNodeError::ProtocolMismatch)?
 				.to_str().map_err(|_| Error::ProtocolMismatch)?;
+			let hash = Hash::from_header(
+				headers.get(header::ETAG).ok_or(CreateNodeError::ProtocolMismatch)?
+			).ok_or(CreateNodeError::ProtocolMismatch)?;
 			
 			let index = location.rfind('/').ok_or(Error::ProtocolMismatch)?;
 			let (_, id) = location.split_at(index + 1);
+			let id = id.parse().map_err(|_| Error::ProtocolMismatch)?;
 			
-			Ok(id.parse().map_err(|_| Error::ProtocolMismatch)?)
+			Ok((id, hash))
 		}
 	}
 	
