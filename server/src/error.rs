@@ -1,7 +1,7 @@
 use axum::{http::{header, StatusCode}, response::{IntoResponse, Response}};
 use diesel::{connection::{AnsiTransactionManager, TransactionManager}, result::Error as DieselError, Connection, SqliteConnection};
 
-#[derive(Clone, Debug)]
+#[derive(PartialEq, Eq, Clone, Debug)]
 pub enum Error {
 	BadRequest,
 	HashMissing,
