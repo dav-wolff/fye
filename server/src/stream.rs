@@ -115,3 +115,52 @@ impl<S: Stream<Item = Result<Bytes, io::Error>>> Stream for HashStream<S> {
 		self.inner.size_hint()
 	}
 }
+
+#[cfg(test)]
+mod tests {
+	use super::*;
+	use crate::testing::*;
+	
+	use std::pin::pin;
+	use futures::StreamExt;
+	use crate::hash::EMPTY_HASH;
+	
+	#[tokio::test]
+	async fn hash_empty() {
+		let stream = bytes_stream_from(&[]);
+		let mut hash_stream = pin!(HashStream::new(stream));
+		
+		assert!(hash_stream.next().await.is_none());
+		
+		assert_eq!(hash_stream.total_size(), 0);
+		assert_eq!(&hash_stream.hash().to_hex(), EMPTY_HASH);
+	}
+	
+	#[tokio::test]
+	async fn hash_single_chunk() {
+		let stream = bytes_stream_from(&[b"Hello"]);
+		let mut hash_stream = pin!(HashStream::new(stream));
+		
+		assert_eq!(hash_stream.next().await.unwrap().unwrap(), &b"Hello"[..]);
+		assert!(hash_stream.next().await.is_none());
+		
+		assert_eq!(hash_stream.total_size(), b"Hello".len() as u64);
+		assert_eq!(hash_stream.hash(), blake3::hash(b"Hello"));
+	}
+	
+	#[tokio::test]
+	async fn hash_multiple_chunks() {
+		let stream = bytes_stream_from(&[b"Multiple ", b"chunks ", b"in ", b"this ", b"slice"]);
+		let mut hash_stream = pin!(HashStream::new(stream));
+		
+		assert_eq!(hash_stream.next().await.unwrap().unwrap(), &b"Multiple "[..]);
+		assert_eq!(hash_stream.next().await.unwrap().unwrap(), &b"chunks "[..]);
+		assert_eq!(hash_stream.next().await.unwrap().unwrap(), &b"in "[..]);
+		assert_eq!(hash_stream.next().await.unwrap().unwrap(), &b"this "[..]);
+		assert_eq!(hash_stream.next().await.unwrap().unwrap(), &b"slice"[..]);
+		assert!(hash_stream.next().await.is_none());
+		
+		assert_eq!(hash_stream.total_size(), b"Multiple chunks in this slice".len() as u64);
+		assert_eq!(hash_stream.hash(), blake3::hash(b"Multiple chunks in this slice"));
+	}
+}

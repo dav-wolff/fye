@@ -1,9 +1,26 @@
-use diesel::{dsl::{AsSelect, SqlTypeOf}, prelude::*, sqlite::Sqlite};
+use diesel::{connection::SimpleConnection, dsl::{AsSelect, SqlTypeOf}, prelude::*, sqlite::Sqlite};
 use diesel::result::Error as DieselError;
+use diesel_migrations::{embed_migrations, EmbeddedMigrations, MigrationHarness};
 use fye_shared::NodeID;
 
 mod schema;
 use schema::*;
+
+pub fn establish_connection(url: &str, run_migrations: bool) -> Result<SqliteConnection, diesel::r2d2::Error> {
+	let mut conn = SqliteConnection::establish(url).map_err(diesel::r2d2::Error::ConnectionError)?;
+	
+	const MIGRATIONS: EmbeddedMigrations = embed_migrations!();
+	
+	if run_migrations {
+		conn.run_pending_migrations(MIGRATIONS).unwrap(); // TODO: what to do about this error?
+	}
+	
+	conn.batch_execute("
+		PRAGMA foreign_keys = ON;
+	").map_err(|err| diesel::r2d2::Error::ConnectionError(diesel::ConnectionError::CouldntSetupConfiguration(err)))?;
+	
+	Ok(conn)
+}
 
 #[derive(Queryable, Selectable, Debug)]
 #[diesel(table_name = node_id)]
