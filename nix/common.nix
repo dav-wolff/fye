@@ -1,7 +1,8 @@
 { lib
 , craneLib
 , pkg-config
-, makeWrapper
+, clang
+, llvmPackages
 , openssl
 , sqlite
 }:
@@ -20,7 +21,8 @@ let
 		
 		nativeBuildInputs = [
 			pkg-config
-			makeWrapper
+			clang # needed to use lld
+			llvmPackages.bintools # lld
 		];
 		
 		buildInputs = [
@@ -40,6 +42,7 @@ in {
 		fileset = lib.fileset.unions [
 			../Cargo.toml
 			../Cargo.lock
+			../.cargo
 			../shared
 			../server/Cargo.toml
 			../client/Cargo.toml

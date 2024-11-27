@@ -57,11 +57,8 @@
 					rust-analyzer
 					diesel-cli
 					pkg-config
-					openssl
-					sqlite
-				];
-				
-				LD_LIBRARY_PATH = with pkgs; lib.makeLibraryPath [
+					clang # needed to use lld
+					llvmPackages.bintools # lld
 					openssl
 					sqlite
 				];
