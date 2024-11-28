@@ -1,5 +1,8 @@
 use super::*;
 
+mod upload_file;
+use upload_file::*;
+
 fn get_file_info(conn: &mut SqliteConnection, id: NodeID) -> Result<db::File, Error> {
 	db::File::get(id)
 		.first(conn).map_err(|err| match err {
@@ -66,16 +69,13 @@ pub async fn write_file_data(mut conn: DbConnection<'_>, directories: Directorie
 		return Err(Error::Modified);
 	}
 	
-	let upload_location = directories.uploads.join(id.0.to_string());
-	let file = OpenOptions::new()
-		.write(true)
-		.create_new(true)
-		.open(&upload_location).await
+	let mut file = UploadFile::new(directories.uploads.join(id.0.to_string())).await
 		.map_err(|err| Error::internal(err, "could not open new file for upload"))?; // TODO: handle case of file already existing
 	
 	let stream = request.into_body().into_data_stream();
 	let mut hash_stream = HashStream::new(stream.map_err(io::Error::other));
-	stream_to_file(file, &mut hash_stream).await.map_err(|err| Error::internal(err, "failed writing to file for upload"))?;
+	stream_to_file(&mut hash_stream, &mut file).await
+		.map_err(|err| Error::internal(err, "failed writing to file for upload"))?;
 	
 	let hash = hash_stream.hash().to_hex();
 	let total_size = hash_stream.total_size();
@@ -89,7 +89,8 @@ pub async fn write_file_data(mut conn: DbConnection<'_>, directories: Directorie
 		}
 		
 		// part of the transaction, so updating the hash gets rolled back if the move fails
-		fs::rename(upload_location, directories.files.join(hash.as_str())).await.map_err(|err| Error::internal(err, "could not move uploaded file to files directory"))?;
+		file.move_to(directories.files.join(hash.as_str())).await
+			.map_err(|err| Error::internal(err, "could not move uploaded file to files directory"))?;
 		
 		Ok(())
 	}).await?;

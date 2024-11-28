@@ -6,7 +6,10 @@ use futures::Stream;
 use tokio::{fs::File, io::AsyncWrite};
 use pin_project::pin_project;
 
-pub fn stream_to_file<S: Stream<Item = Result<Bytes, io::Error>>>(file: File, stream: S) -> impl Future<Output = Result<(), io::Error>> {
+pub fn stream_to_file<'f, S>(stream: S, file: &'f mut File) -> impl Future<Output = Result<(), io::Error>> + 'f
+where
+	S: Stream<Item = Result<Bytes, io::Error>> + 'f
+{
 	StreamToFile {
 		file,
 		stream,
@@ -15,15 +18,18 @@ pub fn stream_to_file<S: Stream<Item = Result<Bytes, io::Error>>>(file: File, st
 }
 
 #[pin_project]
-struct StreamToFile<S: Stream<Item = Result<Bytes, io::Error>>> {
+struct StreamToFile<'f, S: Stream<Item = Result<Bytes, io::Error>>> {
 	#[pin]
 	stream: S,
 	#[pin]
-	file: File,
+	file: &'f mut File,
 	current_bytes: Bytes,
 }
 
-impl<S: Stream<Item = Result<Bytes, io::Error>>> StreamToFile<S> {
+impl<'f, S> StreamToFile<'f, S>
+where
+	S: Stream<Item = Result<Bytes, io::Error>>
+{
 	fn write_current_bytes(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Result<(), io::Error>> {
 		let this = self.project();
 		let mut file = this.file;
@@ -45,7 +51,10 @@ impl<S: Stream<Item = Result<Bytes, io::Error>>> StreamToFile<S> {
 	}
 }
 
-impl<S: Stream<Item = Result<Bytes, io::Error>>> Future for StreamToFile<S> {
+impl<'f, S> Future for StreamToFile<'f, S>
+where
+	S: Stream<Item = Result<Bytes, io::Error>>
+{
 	type Output = Result<(), io::Error>;
 	
 	fn poll(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Self::Output> {

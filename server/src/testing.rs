@@ -1,6 +1,6 @@
 #![cfg(test)]
 
-use std::io;
+use std::{io, pin::Pin, task::{Context, Poll}};
 
 use axum::http::{header, HeaderMap};
 use bytes::Bytes;
@@ -72,6 +72,9 @@ impl TestDirectories {
 			files: temp_dir.path().join("files").into(),
 		};
 		
+		std::fs::create_dir_all(&directories.uploads).unwrap();
+		std::fs::create_dir_all(&directories.files).unwrap();
+		
 		Self {
 			temp_dir: Some(temp_dir),
 			directories,
@@ -90,6 +93,33 @@ impl Drop for TestDirectories {
 				.into_path();
 			
 			eprintln!("Panicked with active temp directory: {}", path.to_string_lossy());
+		}
+	}
+}
+
+pub struct PartialBody {
+	text: Vec<u8>,
+	is_available: bool,
+}
+
+impl PartialBody {
+	pub fn new(data: Vec<u8>) -> Self {
+		Self {
+			text: data,
+			is_available: true,
+		}
+	}
+}
+
+impl Stream for PartialBody {
+	type Item = Result<Vec<u8>, io::Error>;
+	
+	fn poll_next(mut self: Pin<&mut Self>, _cx: &mut Context<'_>) -> Poll<Option<Self::Item>> {
+		if self.is_available {
+			self.is_available = false;
+			Poll::Ready(Some(Ok(self.text.clone())))
+		} else {
+			Poll::Ready(Some(Err(io::Error::other("no more body"))))
 		}
 	}
 }

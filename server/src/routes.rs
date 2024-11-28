@@ -16,7 +16,7 @@ use diesel::{result::DatabaseErrorKind, RunQueryDsl as _, OptionalExtension as _
 use diesel::result::Error as DieselError;
 use fye_shared::{NodeInfo, DirectoryInfo, FileInfo, NodeID, Hash};
 use futures::TryStreamExt;
-use tokio::fs::{self, File, OpenOptions};
+use tokio::fs::File;
 use tokio_util::io::ReaderStream;
 
 use crate::{db, error::{transaction, async_transaction, Error}, extractors::{DbConnection, Directories}, hash::EMPTY_HASH, stream::{stream_to_file, HashStream}};
@@ -26,6 +26,7 @@ mod tests {
 	use super::*;
 	use crate::testing::*;
 	
+	use std::error::Error as _;
 	use axum::http::Request;
 	use futures::StreamExt;
 	
@@ -266,6 +267,42 @@ mod tests {
 		
 		let mut stream = body.into_data_stream();
 		assert!(stream.next().await.is_none());
+	}
+	
+	#[tokio::test]
+	async fn upload_failed_partial() {
+		let mut db = TestDb::new();
+		let directories = TestDirectories::new();
+		
+		let (_, headers) = create_file(db.conn(), Path(ROOT), Postcard("file".to_owned())).await.unwrap();
+		let id = parse_location(&headers, NodeKind::File);
+		
+		// should be repeatable
+		for _ in 0..2 {
+			let stream = PartialBody::new(b"Partial content".into());
+			let request = Request::builder()
+				.header(header::IF_MATCH, Hash(EMPTY_HASH.to_owned()).to_header())
+				.body(Body::from_stream(stream)).unwrap();
+			let err = write_file_data(db.conn(), directories.dirs(), Path(id), request).await.unwrap_err();
+			// TODO: maybe the route should return a different error
+			assert!(matches!(err, Error::Internal(_)));
+			let err = err.source().unwrap().downcast_ref::<io::Error>().unwrap();
+			assert_eq!(err.kind(), io::ErrorKind::Other);
+			assert_eq!(err.get_ref().unwrap().to_string(), "no more body");
+		}
+		
+		// file data is empty
+		let (headers, body) = file_data(db.conn(), directories.dirs(), Path(id), HeaderMap::new()).await.unwrap();
+		assert_eq!(headers.len(), 1);
+		assert_eq!(headers.get(header::ETAG).unwrap(), Hash(EMPTY_HASH.to_owned()).to_header());
+		
+		let mut stream = body.into_data_stream();
+		assert!(stream.next().await.is_none());
+		
+		// directories are empty
+		let dirs = directories.dirs();
+		assert!(dirs.uploads.read_dir().unwrap().next().is_none());
+		assert!(dirs.files.read_dir().unwrap().next().is_none());
 	}
 	
 	// TODO: add more test cases
