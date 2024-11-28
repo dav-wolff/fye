@@ -5,12 +5,12 @@ fn get_file_info(conn: &mut SqliteConnection, id: NodeID) -> Result<db::File, Er
 		.first(conn).map_err(|err| match err {
 			DieselError::NotFound => {
 				match db::Directory::exists(conn, id) {
-					Err(_) => Error::Database,
+					Err(err) => Error::internal(err, "failed looking up node"),
 					Ok(true) => Error::NotAFile,
 					Ok(false) => Error::NotFound,
 				}
 			},
-			_ => Error::Database, // TODO: what to do about unexpected error types?
+			err => Error::internal(err, "failed looking up node"),
 		})
 }
 
@@ -48,7 +48,7 @@ pub async fn file_data(mut conn: DbConnection<'_>, directories: Directories, Pat
 		return Ok((headers, Body::empty()));
 	}
 	
-	let file = File::open(directories.files.join(&file_info.hash)).await.map_err(|_| Error::IO)?;
+	let file = File::open(directories.files.join(&file_info.hash)).await.map_err(|err| Error::internal(err, "could not open requested file"))?;
 	let stream = ReaderStream::new(file);
 	let body = Body::from_stream(stream);
 	
@@ -71,25 +71,25 @@ pub async fn write_file_data(mut conn: DbConnection<'_>, directories: Directorie
 		.write(true)
 		.create_new(true)
 		.open(&upload_location).await
-		.map_err(|_| Error::IO)?; // TODO: handle case of file already existing
+		.map_err(|err| Error::internal(err, "could not open new file for upload"))?; // TODO: handle case of file already existing
 	
 	let stream = request.into_body().into_data_stream();
 	let mut hash_stream = HashStream::new(stream.map_err(io::Error::other));
-	stream_to_file(file, &mut hash_stream).await.map_err(|_| Error::IO)?;
+	stream_to_file(file, &mut hash_stream).await.map_err(|err| Error::internal(err, "failed writing to file for upload"))?;
 	
 	let hash = hash_stream.hash().to_hex();
 	let total_size = hash_stream.total_size();
 	
 	async_transaction(&mut conn, async |conn| {
 		let found = db::File::update_content(conn, id, &prev_hash.0, &hash, total_size)
-			.map_err(|_| Error::Database)?;
+			.map_err(|err| Error::internal(err, "failed updating node"))?;
 		
 		if !found {
 			return Err(Error::Modified);
 		}
 		
 		// part of the transaction, so updating the hash gets rolled back if the move fails
-		fs::rename(upload_location, directories.files.join(hash.as_str())).await.map_err(|_| Error::IO)?;
+		fs::rename(upload_location, directories.files.join(hash.as_str())).await.map_err(|err| Error::internal(err, "could not move uploaded file to files directory"))?;
 		
 		Ok(())
 	}).await?;

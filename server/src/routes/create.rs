@@ -3,7 +3,7 @@ use super::*;
 fn get_entry_url(conn: &mut SqliteConnection, parent_id: NodeID, name: &str) -> Result<String, Error> {
 	// why does rust-analyzer need a type annotation to know what type this is?
 	let entry: db::DirectoryEntry = db::DirectoryEntry::get(parent_id, name)
-		.first(conn).map_err(|_| Error::Database)?;
+		.first(conn).map_err(|err| Error::internal(err, "failed looking up directory entry"))?;
 	
 	Ok(match (entry.directory, entry.file) {
 		(Some(dir_id), None) => format!("/api/dir/{dir_id}"),
@@ -14,14 +14,14 @@ fn get_entry_url(conn: &mut SqliteConnection, parent_id: NodeID, name: &str) -> 
 
 pub async fn create_dir(mut conn: DbConnection<'_>, Path(parent_id): Path<NodeID>, Postcard(name): Postcard<String>) -> Result<(StatusCode, HeaderMap), Error> {
 	let id = transaction(&mut conn, |conn| {
-		let id = db::next_available_id(conn).map_err(|_| Error::Database)?;
+		let id = db::next_available_id(conn).map_err(|err| Error::internal(err, "failed generating next id"))?;
 		
 		let dir = db::Directory {
 			id: id.0 as i64,
 			parent: parent_id.0 as i64,
 		};
 		
-		dir.insert(conn).map_err(|_| Error::Database)?;
+		dir.insert(conn).map_err(|err| Error::internal(err, "failed inserting new node"))?;
 		
 		let dir_entry = db::NewDirectoryEntry {
 			parent: parent_id.0 as i64,
@@ -38,7 +38,7 @@ pub async fn create_dir(mut conn: DbConnection<'_>, Path(parent_id): Path<NodeID
 				Ok(url) => Error::AlreadyExists(url),
 				Err(err) => err,
 			},
-			_ => Error::Database,
+			err => Error::internal(err, "failed inserting new directory entry"),
 		})?;
 		
 		Ok(id)
@@ -52,7 +52,7 @@ pub async fn create_dir(mut conn: DbConnection<'_>, Path(parent_id): Path<NodeID
 
 pub async fn create_file(mut conn: DbConnection<'_>, Path(parent_id): Path<NodeID>, Postcard(name): Postcard<String>) -> Result<(StatusCode, HeaderMap), Error> {
 	let id = transaction(&mut conn, |conn| {
-		let id = db::next_available_id(conn).map_err(|_| Error::Database)?;
+		let id = db::next_available_id(conn).map_err(|err| Error::internal(err, "failed generating next id"))?;
 		
 		let file = db::File {
 			id: id.0 as i64,
@@ -60,7 +60,7 @@ pub async fn create_file(mut conn: DbConnection<'_>, Path(parent_id): Path<NodeI
 			hash: EMPTY_HASH.to_owned(), // TODO: avoid allocation
 		};
 		
-		file.insert(conn).map_err(|_| Error::Database)?;
+		file.insert(conn).map_err(|err| Error::internal(err, "failed inserting new node"))?;
 		
 		let dir_entry = db::NewDirectoryEntry {
 			parent: parent_id.0 as i64,
@@ -77,7 +77,7 @@ pub async fn create_file(mut conn: DbConnection<'_>, Path(parent_id): Path<NodeI
 				Ok(url) => Error::AlreadyExists(url),
 				Err(err) => err,
 			},
-			_ => Error::Database,
+			err => Error::internal(err, "failed inserting new directory entry"),
 		})?;
 		
 		Ok(id)

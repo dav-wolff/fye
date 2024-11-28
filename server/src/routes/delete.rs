@@ -8,12 +8,12 @@ pub async fn delete_dir(mut conn: DbConnection<'_>, Path(parent_id): Path<NodeID
 			.first(conn).map_err(|err| match err {
 				DieselError::NotFound => {
 					match db::File::exists(conn, parent_id) {
-						Err(_) => Error::Database,
+						Err(err) => Error::internal(err, "failed looking up node"),
 						Ok(true) => Error::NotADirectory,
 						Ok(false) => Error::NotFound,
 					}
 				},
-				_ => Error::Database,
+				err => Error::internal(err, "failed looking up node"),
 			})?;
 		
 		let id = match (entry.directory, entry.file) {
@@ -25,7 +25,7 @@ pub async fn delete_dir(mut conn: DbConnection<'_>, Path(parent_id): Path<NodeID
 		match db::Directory::delete(conn, NodeID(id as u64)) {
 			// foreign key violation because directory_entries.parent has foreign key on directory meaning the directory is not empty
 			Err(DieselError::DatabaseError(DatabaseErrorKind::ForeignKeyViolation, _)) => Err(Error::DirectoryNotEmpty),
-			Err(_) => Err(Error::Database),
+			Err(err) => Err(Error::internal(err, "failed deleting node")),
 			Ok(false) => panic!("should be impossible as the foreign key constraint on the directory_entries table means the directory must exist"),
 			Ok(true) => Ok(()),
 		}
@@ -42,12 +42,12 @@ pub async fn delete_file(mut conn: DbConnection<'_>, Path(parent_id): Path<NodeI
 			.first(conn).map_err(|err| match err {
 				DieselError::NotFound => {
 					match db::File::exists(conn, parent_id) {
-						Err(_) => Error::Database,
+						Err(err) => Error::internal(err, "failed looking up node"),
 						Ok(true) => Error::NotADirectory,
 						Ok(false) => Error::NotFound,
 					}
 				},
-				_ => Error::Database,
+				err => Error::internal(err, "failed looking up node"),
 			})?;
 		
 		let id = match (entry.directory, entry.file) {
@@ -56,7 +56,7 @@ pub async fn delete_file(mut conn: DbConnection<'_>, Path(parent_id): Path<NodeI
 			_ => panic!("should be impossible due to the check on the directory_entries table"),
 		};
 		
-		if db::File::delete(conn, NodeID(id as u64)).map_err(|_| Error::Database)? {
+		if db::File::delete(conn, NodeID(id as u64)).map_err(|err| Error::internal(err, "failed deleting node"))? {
 			Ok(())
 		} else {
 			panic!("should be impossible as the foreign key constraint on the directory_entries table means the file must exist");

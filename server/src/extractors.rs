@@ -119,7 +119,7 @@ impl FromRequestParts<AppState> for DbConnection<'static> {
 			tokio::task::spawn_blocking(move || {
 				match db_pool.get() { // may block
 					Ok(conn) => Ok(DbConnection::new(conn)),
-					Err(_) => Err(Error::Database),
+					Err(err) => Err(Error::internal(err, "could not acquire a connection from the pool")),
 				}
 			}).await.expect("db_pool.get() should not panic")
 		}.boxed()

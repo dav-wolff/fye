@@ -5,7 +5,7 @@ pub async fn node_info(mut conn: DbConnection<'_>, Path(id): Path<NodeID>) -> Re
 	
 	if let Some(file) = db::File::get(id)
 		.first(conn)
-		.optional().map_err(|_| Error::Database)?
+		.optional().map_err(|err| Error::internal(err, "failed looking up node"))?
 	{
 		Ok(Postcard(NodeInfo::File(FileInfo {
 			size: file.size as u64,
@@ -13,10 +13,10 @@ pub async fn node_info(mut conn: DbConnection<'_>, Path(id): Path<NodeID>) -> Re
 		})))
 	} else if let Some(dir) = db::Directory::get(id)
 		.first(conn)
-		.optional().map_err(|_| Error::Database)?
+		.optional().map_err(|err| Error::internal(err, "failed looking up node"))?
 	{
 		let children = dir.entries()
-			.load(conn).map_err(|_| Error::Database)?
+			.load(conn).map_err(|err| Error::internal(err, "failed looking up directory entries"))?
 			.into_iter()
 			.map(|entry| {
 				let node_id = match (entry.directory, entry.file) {
@@ -45,16 +45,16 @@ pub async fn dir_info(mut conn: DbConnection<'_>, Path(id): Path<NodeID>) -> Res
 		.first(conn).map_err(|err| match err {
 			DieselError::NotFound => {
 				match db::File::exists(conn, id) {
-					Err(_) => Error::Database,
+					Err(err) => Error::internal(err, "failed looking up node"),
 					Ok(true) => Error::NotADirectory,
 					Ok(false) => Error::NotFound,
 				}
 			},
-			_ => Error::Database, // TODO: what to do about unexpected error types?
+			err => Error::internal(err, "failed looking up node"), // TODO: what to do about unexpected error types?
 		})?;
 	
 	let children = dir.entries()
-		.load(conn).map_err(|_| Error::Database)?
+		.load(conn).map_err(|err| Error::internal(err, "failed looking up directory entries"))?
 		.into_iter()
 		.map(|entry| {
 			let node_id = match (entry.directory, entry.file) {

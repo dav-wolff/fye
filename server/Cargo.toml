@@ -21,6 +21,7 @@ bytes = "1.7"
 pin-project = "1.1"
 tokio-util = { version = "0.7", features = ["io"] }
 blake3 = "1.5"
+tower-http = { version = "0.6", features = ["catch-panic"] }
 
 [dev-dependencies]
 tempfile = "3.13"
