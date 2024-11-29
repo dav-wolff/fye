@@ -8,18 +8,16 @@ pub use files::*;
 pub use create::*;
 pub use delete::*;
 
-use std::io;
-
-use axum::{body::Body, extract::{Request, Path}, http::{header, StatusCode, HeaderMap}};
+use axum::{body::Body, extract::Path, http::StatusCode};
 use axum_postcard::Postcard;
 use diesel::{result::DatabaseErrorKind, RunQueryDsl as _, OptionalExtension as _, SqliteConnection};
 use diesel::result::Error as DieselError;
 use fye_shared::{NodeInfo, DirectoryInfo, FileInfo, NodeID, Hash};
-use futures::TryStreamExt;
 use tokio::fs::File;
 use tokio_util::io::ReaderStream;
 
-use crate::{db, error::{transaction, async_transaction, Error}, extractors::{DbConnection, Directories}, hash::EMPTY_HASH, stream::{stream_to_file, HashStream}};
+use crate::{db, error::{transaction, async_transaction, Error}, hash::EMPTY_HASH, stream::{stream_to_file, HashStream}};
+use crate::extractors::*;
 
 #[cfg(test)]
 mod tests {
@@ -27,7 +25,7 @@ mod tests {
 	use crate::testing::*;
 	
 	use std::error::Error as _;
-	use axum::http::Request;
+	use std::io;
 	use futures::StreamExt;
 	
 	const ROOT: NodeID = NodeID(1);
@@ -46,13 +44,10 @@ mod tests {
 		let Err(err) = file_info(db.conn(), Path(NodeID(2))).await else {panic!()};
 		assert_eq!(err, Error::NotFound);
 		
-		let Err(err) = file_data(db.conn(), directories.dirs(), Path(NodeID(2)), HeaderMap::new()).await else {panic!()};
+		let Err(err) = file_data(db.conn(), directories.dirs(), Path(NodeID(2)), OptHeader(None), OptHeader(None)).await else {panic!()};
 		assert_eq!(err, Error::NotFound);
 		
-		let request = Request::builder()
-			.header(header::IF_MATCH, Hash(EMPTY_HASH.to_owned()).to_header())
-			.body(Body::empty()).unwrap();
-		let Err(err) = write_file_data(db.conn(), directories.dirs(), Path(NodeID(2)), request).await else {panic!()};
+		let Err(err) = write_file_data(db.conn(), directories.dirs(), Path(NodeID(2)), Header(Hash(EMPTY_HASH.to_owned())), BodyStream::empty()).await else {panic!()};
 		assert_eq!(err, Error::NotFound);
 		
 		let Err(err) = delete_dir(db.conn(), Path(NodeID(2)), Postcard("something".to_owned())).await else {panic!()};
@@ -78,11 +73,9 @@ mod tests {
 	async fn new_dir() {
 		let mut db = TestDb::new();
 		
-		let (status, headers) = create_dir(db.conn(), Path(ROOT), Postcard("directory".to_owned())).await.unwrap();
+		let (status, Header(location)) = create_dir(db.conn(), Path(ROOT), Postcard("directory".to_owned())).await.unwrap();
 		assert_eq!(status, StatusCode::CREATED);
-		assert_eq!(headers.len(), 1);
-		
-		let id = parse_location(&headers, NodeKind::Directory);
+		let Location::Directory(id) = location else {panic!()};
 		
 		let Postcard(parent) = dir_info(db.conn(), Path(ROOT)).await.unwrap();
 		assert_eq!(parent.parent, ROOT);
@@ -110,12 +103,11 @@ mod tests {
 	async fn new_file() {
 		let mut db = TestDb::new();
 		
-		let (status, headers) = create_file(db.conn(), Path(ROOT), Postcard("file".to_owned())).await.unwrap();
+		let (status, Header(location), Header(hash)) = create_file(db.conn(), Path(ROOT), Postcard("file".to_owned())).await.unwrap();
 		assert_eq!(status, StatusCode::CREATED);
-		assert_eq!(headers.len(), 2);
-		assert_eq!(headers.get(header::ETAG).unwrap().to_str().unwrap(), format!("\"{EMPTY_HASH}\""));
+		assert_eq!(hash.0, EMPTY_HASH);
 		
-		let id = parse_location(&headers, NodeKind::File);
+		let Location::File(id) = location else {panic!()};
 		
 		let Postcard(parent) = dir_info(db.conn(), Path(ROOT)).await.unwrap();
 		assert_eq!(parent.parent, ROOT);
@@ -145,8 +137,8 @@ mod tests {
 	async fn deleted_dir() {
 		let mut db = TestDb::new();
 		
-		let (_, headers) = create_dir(db.conn(), Path(ROOT), Postcard("deleted".to_owned())).await.unwrap();
-		let id = parse_location(&headers, NodeKind::Directory);
+		let (_, Header(location)) = create_dir(db.conn(), Path(ROOT), Postcard("deleted".to_owned())).await.unwrap();
+		let Location::Directory(id) = location else {panic!()};
 		
 		let status = delete_dir(db.conn(), Path(ROOT), Postcard("deleted".to_owned())).await.unwrap();
 		assert_eq!(status, StatusCode::NO_CONTENT);
@@ -168,8 +160,8 @@ mod tests {
 	async fn deleted_file() {
 		let mut db = TestDb::new();
 		
-		let (_, headers) = create_file(db.conn(), Path(ROOT), Postcard("deleted".to_owned())).await.unwrap();
-		let id = parse_location(&headers, NodeKind::File);
+		let (_, Header(location), _) = create_file(db.conn(), Path(ROOT), Postcard("deleted".to_owned())).await.unwrap();
+		let Location::File(id) = location else {panic!()};
 		
 		let status = delete_file(db.conn(), Path(ROOT), Postcard("deleted".to_owned())).await.unwrap();
 		assert_eq!(status, StatusCode::NO_CONTENT);
@@ -191,14 +183,11 @@ mod tests {
 	async fn delete_wrong_type() {
 		let mut db = TestDb::new();
 		
-		let (_, headers) = create_dir(db.conn(), Path(ROOT), Postcard("directory".to_owned())).await.unwrap();
-		let dir_id = parse_location(&headers, NodeKind::Directory);
+		let (_, Header(location)) = create_dir(db.conn(), Path(ROOT), Postcard("directory".to_owned())).await.unwrap();
+		let Location::Directory(dir_id) = location else {panic!()};
 		
-		let (status, headers) = create_file(db.conn(), Path(ROOT), Postcard("file".to_owned())).await.unwrap();
-		assert_eq!(status, StatusCode::CREATED);
-		assert_eq!(headers.len(), 2);
-		
-		let file_id = parse_location(&headers, NodeKind::File);
+		let (_, Header(location), _) = create_file(db.conn(), Path(ROOT), Postcard("file".to_owned())).await.unwrap();
+		let Location::File(file_id) = location else {panic!()};
 		
 		let Err(err) = delete_file(db.conn(), Path(ROOT), Postcard("directory".to_owned())).await else {panic!()};
 		assert_eq!(err, Error::NotAFile);
@@ -226,31 +215,21 @@ mod tests {
 	async fn already_exists() {
 		let mut db = TestDb::new();
 		
-		let (_, headers) = create_dir(db.conn(), Path(ROOT), Postcard("directory".to_owned())).await.unwrap();
-		let dir_id = parse_location(&headers, NodeKind::Directory);
+		let (_, Header(dir_location)) = create_dir(db.conn(), Path(ROOT), Postcard("directory".to_owned())).await.unwrap();
 		
-		let (_, headers) = create_file(db.conn(), Path(ROOT), Postcard("file".to_owned())).await.unwrap();
-		let file_id = parse_location(&headers, NodeKind::File);
+		let (_, Header(file_location), _) = create_file(db.conn(), Path(ROOT), Postcard("file".to_owned())).await.unwrap();
 		
 		let err = create_dir(db.conn(), Path(ROOT), Postcard("directory".to_owned())).await.unwrap_err();
-		let Error::AlreadyExists(location) = err else {panic!("wrong error")};
-		let id = parse_location_str(&location, NodeKind::Directory);
-		assert_eq!(id, dir_id);
+		assert_eq!(err, Error::AlreadyExists(dir_location.clone()));
 		
 		let err = create_file(db.conn(), Path(ROOT), Postcard("directory".to_owned())).await.unwrap_err();
-		let Error::AlreadyExists(location) = err else {panic!("wrong error")};
-		let id = parse_location_str(&location, NodeKind::Directory);
-		assert_eq!(id, dir_id);
+		assert_eq!(err, Error::AlreadyExists(dir_location));
 		
 		let err = create_dir(db.conn(), Path(ROOT), Postcard("file".to_owned())).await.unwrap_err();
-		let Error::AlreadyExists(location) = err else {panic!("wrong error")};
-		let id = parse_location_str(&location, NodeKind::File);
-		assert_eq!(id, file_id);
+		assert_eq!(err, Error::AlreadyExists(file_location.clone()));
 		
 		let err = create_file(db.conn(), Path(ROOT), Postcard("file".to_owned())).await.unwrap_err();
-		let Error::AlreadyExists(location) = err else {panic!("wrong error")};
-		let id = parse_location_str(&location, NodeKind::File);
-		assert_eq!(id, file_id);
+		assert_eq!(err, Error::AlreadyExists(file_location));
 	}
 	
 	#[tokio::test]
@@ -258,12 +237,11 @@ mod tests {
 		let mut db = TestDb::new();
 		let directories = TestDirectories::new();
 		
-		let (_, headers) = create_file(db.conn(), Path(ROOT), Postcard("file".to_owned())).await.unwrap();
-		let id = parse_location(&headers, NodeKind::File);
+		let (_, Header(location), _) = create_file(db.conn(), Path(ROOT), Postcard("file".to_owned())).await.unwrap();
+		let Location::File(id) = location else {panic!()};
 		
-		let (headers, body) = file_data(db.conn(), directories.dirs(), Path(id), HeaderMap::new()).await.unwrap();
-		assert_eq!(headers.len(), 1);
-		assert_eq!(headers.get(header::ETAG).unwrap(), Hash(EMPTY_HASH.to_owned()).to_header());
+		let (Header(hash), body) = file_data(db.conn(), directories.dirs(), Path(id), OptHeader(None), OptHeader(None)).await.unwrap();
+		assert_eq!(hash, Hash(EMPTY_HASH.to_owned()));
 		
 		let mut stream = body.into_data_stream();
 		assert!(stream.next().await.is_none());
@@ -274,16 +252,13 @@ mod tests {
 		let mut db = TestDb::new();
 		let directories = TestDirectories::new();
 		
-		let (_, headers) = create_file(db.conn(), Path(ROOT), Postcard("file".to_owned())).await.unwrap();
-		let id = parse_location(&headers, NodeKind::File);
+		let (_, Header(location), _) = create_file(db.conn(), Path(ROOT), Postcard("file".to_owned())).await.unwrap();
+		let Location::File(id) = location else {panic!()};
 		
 		// should be repeatable
 		for _ in 0..2 {
 			let stream = PartialBody::new(b"Partial content".into());
-			let request = Request::builder()
-				.header(header::IF_MATCH, Hash(EMPTY_HASH.to_owned()).to_header())
-				.body(Body::from_stream(stream)).unwrap();
-			let err = write_file_data(db.conn(), directories.dirs(), Path(id), request).await.unwrap_err();
+			let err = write_file_data(db.conn(), directories.dirs(), Path(id), Header(Hash(EMPTY_HASH.to_owned())), BodyStream::from_stream(stream)).await.unwrap_err();
 			// TODO: maybe the route should return a different error
 			assert!(matches!(err, Error::Internal(_)));
 			let err = err.source().unwrap().downcast_ref::<io::Error>().unwrap();
@@ -292,15 +267,15 @@ mod tests {
 		}
 		
 		// file data is empty
-		let (headers, body) = file_data(db.conn(), directories.dirs(), Path(id), HeaderMap::new()).await.unwrap();
-		assert_eq!(headers.len(), 1);
-		assert_eq!(headers.get(header::ETAG).unwrap(), Hash(EMPTY_HASH.to_owned()).to_header());
+		let (Header(hash), body) = file_data(db.conn(), directories.dirs(), Path(id), OptHeader(None), OptHeader(None)).await.unwrap();
+		assert_eq!(hash, Hash(EMPTY_HASH.to_owned()));
 		
 		let mut stream = body.into_data_stream();
 		assert!(stream.next().await.is_none());
 		
 		// directories are empty
 		let dirs = directories.dirs();
+		// TODO: race condition?
 		assert!(dirs.uploads.read_dir().unwrap().next().is_none());
 		assert!(dirs.files.read_dir().unwrap().next().is_none());
 	}

@@ -1,11 +1,23 @@
-use std::{convert::Infallible, future::{self, Future}, marker::{PhantomData, Send}, ops::{Deref, DerefMut}, path::Path, pin::Pin, sync::{atomic::{AtomicBool, Ordering}, Arc}};
+use std::{convert::Infallible, future::{self, Future}, io, marker::{PhantomData, Send}, ops::{Deref, DerefMut}, path::Path, pin::Pin, sync::{atomic::{AtomicBool, Ordering}, Arc}, task::{Context, Poll}};
 
-use axum::{extract::FromRequestParts, http::request::Parts};
+use axum::{body::BodyDataStream, extract::{FromRequest, FromRequestParts, Request}, http::request::Parts};
+use bytes::Bytes;
 use diesel::{r2d2::R2D2Connection, SqliteConnection};
-use futures::FutureExt;
+use futures::{FutureExt, Stream};
+use pin_project::pin_project;
 use r2d2::{ManageConnection, Pool, PooledConnection};
 
+#[cfg(test)]
+use axum::{body::Body, BoxError};
+#[cfg(test)]
+use futures::TryStream;
+
 use crate::{db, error::Error};
+
+mod headers;
+pub use headers::*;
+
+type BoxedFuture<'a, O> = Pin<Box<dyn Future<Output = O> + Send + 'a>>;
 
 #[derive(Clone, Debug)]
 pub struct AppState {
@@ -99,8 +111,6 @@ enum ConnectionKind<'a> {
 	Single(&'a mut SqliteConnection),
 }
 
-type BoxedFuture<'a, O> = Pin<Box<dyn Future<Output = O> + Send + 'a>>;
-
 impl FromRequestParts<AppState> for DbConnection<'static> {
 	type Rejection = Error;
 	
@@ -159,5 +169,64 @@ impl<'a> Deref for DbConnection<'a> {
 impl<'a> DerefMut for DbConnection<'a> {
 	fn deref_mut(&mut self) -> &mut Self::Target {
 		self.0.deref_mut()
+	}
+}
+
+#[pin_project]
+pub struct BodyStream {
+	#[pin]
+	stream: BodyDataStream,
+}
+
+#[cfg(test)]
+impl BodyStream {
+	pub fn empty() -> Self {
+		Self {
+			stream: Body::empty().into_data_stream(),
+		}
+	}
+	
+	pub fn from_stream<S>(stream: S) -> Self
+	where
+		S: TryStream + Send + 'static,
+		S::Ok: Into<Bytes>,
+		S::Error: Into<BoxError>,
+	{
+		Self {
+			stream: Body::from_stream(stream).into_data_stream(),
+		}
+	}
+}
+
+impl<S> FromRequest<S> for BodyStream {
+	type Rejection = Infallible;
+	
+	fn from_request<'s, 'f>(request: Request, _state: &'s S) -> BoxedFuture<'f, Result<Self, Self::Rejection>>
+	where
+		's: 'f,
+	{
+		let stream = request.into_body().into_data_stream();
+		
+		future::ready(Ok(Self {
+			stream,
+		})).boxed()
+	}
+}
+
+impl Stream for BodyStream {
+	type Item = Result<Bytes, io::Error>;
+	
+	fn poll_next(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Option<Self::Item>> {
+		let this = self.project();
+		
+		this.stream.poll_next(cx).map(|option|
+			option.map(|result|
+				result.map_err(io::Error::other)
+			)
+		)
+	}
+	
+	fn size_hint(&self) -> (usize, Option<usize>) {
+		self.stream.size_hint()
 	}
 }

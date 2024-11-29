@@ -10,7 +10,7 @@ path = "src/main.rs"
 
 [dependencies]
 fye_shared.workspace = true
-axum = { version = "0.7", default-features = false, features = ["http1", "http2", "tokio"] }
+axum = { version = "0.7", default-features = false, features = ["http1", "http2", "tokio", "macros"] }
 tokio = { version = "1.40", features = ["rt", "net", "macros", "rt-multi-thread"] }
 axum-postcard = "0.2"
 diesel = { version = "2.2", features = ["sqlite", "returning_clauses_for_sqlite_3_35", "r2d2"] }

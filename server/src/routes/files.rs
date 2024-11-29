@@ -26,42 +26,44 @@ pub async fn file_info(mut conn: DbConnection<'_>, Path(id): Path<NodeID>) -> Re
 	}))
 }
 
-pub async fn file_data(mut conn: DbConnection<'_>, directories: Directories, Path(id): Path<NodeID>, headers: HeaderMap) -> Result<(HeaderMap, Body), Error> {
-	let if_match = headers.get(header::IF_MATCH)
-		.map(|header| Hash::parse_header(header).ok_or(Error::BadRequest))
-		.transpose()?;
-	let none_match = headers.get(header::IF_NONE_MATCH)
-		.map(|header| Hash::parse_header(header).ok_or(Error::BadRequest))
-		.transpose()?;
-	
+pub async fn file_data(
+	mut conn: DbConnection<'_>,
+	directories: Directories,
+	Path(id): Path<NodeID>,
+	OptHeader(if_match): OptHeader<IfMatch>,
+	OptHeader(none_match): OptHeader<IfNoneMatch>
+) -> Result<(Header<ETag>, Body), Error> {
 	let file_info = get_file_info(&mut conn, id)?;
 	
-	if if_match.is_some_and(|hash| hash != file_info.hash) {
+	let hash = Hash(file_info.hash.clone()); // TODO: avoid clone
+	
+	if if_match.is_some_and(|expected| expected != hash) {
 		return Err(Error::Modified);
 	}
 	
-	if none_match.is_some_and(|hash| hash == file_info.hash) {
+	if none_match.is_some_and(|expected| expected == hash) {
 		return Err(Error::NotModified);
 	}
 	
-	let mut headers = HeaderMap::new();
-	headers.insert(header::ETAG, Hash(file_info.hash.clone()).to_header()); // TODO: avoid clone
+	let body = if file_info.hash == EMPTY_HASH {
+		Body::empty()
+	} else {
+		let file = File::open(directories.files.join(&file_info.hash)).await.map_err(|err| Error::internal(err, "could not open requested file"))?;
+		let stream = ReaderStream::new(file);
+		Body::from_stream(stream)
+	};
 	
-	if file_info.hash == EMPTY_HASH {
-		return Ok((headers, Body::empty()));
-	}
-	
-	let file = File::open(directories.files.join(&file_info.hash)).await.map_err(|err| Error::internal(err, "could not open requested file"))?;
-	let stream = ReaderStream::new(file);
-	let body = Body::from_stream(stream);
-	
-	Ok((headers, body))
+	Ok((Header(hash), body))
 }
 
-pub async fn write_file_data(mut conn: DbConnection<'_>, directories: Directories, Path(id): Path<NodeID>, request: Request) -> Result<StatusCode, Error> {
+pub async fn write_file_data(
+	mut conn: DbConnection<'_>,
+	directories: Directories,
+	Path(id): Path<NodeID>,
+	Header(prev_hash): Header<IfMatch>,
+	body_stream: BodyStream
+) -> Result<StatusCode, Error> {
 	// TODO: delete upload file in case of error
-	
-	let prev_hash = Hash::from_header(request.headers().get(header::IF_MATCH).ok_or(Error::HashMissing)?).ok_or(Error::BadRequest)?;
 	
 	let file_info = get_file_info(&mut conn, id)?;
 	
@@ -72,8 +74,7 @@ pub async fn write_file_data(mut conn: DbConnection<'_>, directories: Directorie
 	let mut file = UploadFile::new(directories.uploads.join(id.0.to_string())).await
 		.map_err(|err| Error::internal(err, "could not open new file for upload"))?; // TODO: handle case of file already existing
 	
-	let stream = request.into_body().into_data_stream();
-	let mut hash_stream = HashStream::new(stream.map_err(io::Error::other));
+	let mut hash_stream = HashStream::new(body_stream);
 	stream_to_file(&mut hash_stream, &mut file).await
 		.map_err(|err| Error::internal(err, "failed writing to file for upload"))?;
 	

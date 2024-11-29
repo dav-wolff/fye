@@ -1,7 +1,9 @@
 use std::{backtrace::{Backtrace, BacktraceStatus}, fmt::{Debug, Display, Formatter}};
 
-use axum::{http::{header, StatusCode}, response::{IntoResponse, Response}};
+use axum::{http::StatusCode, response::{IntoResponse, Response}};
 use diesel::{connection::{AnsiTransactionManager, TransactionManager}, result::Error as DieselError, Connection, SqliteConnection};
+
+use crate::extractors::{Header, Location};
 
 #[derive(PartialEq, Debug)]
 pub enum Error {
@@ -11,7 +13,7 @@ pub enum Error {
 	NotFound,
 	NotAFile,
 	NotADirectory,
-	AlreadyExists(String),
+	AlreadyExists(Location),
 	DirectoryNotEmpty,
 	Modified,
 	NotModified,
@@ -88,7 +90,7 @@ impl IntoResponse for Error {
 			NotFound => StatusCode::NOT_FOUND.into_response(),
 			NotAFile => (StatusCode::CONFLICT, "Not A File").into_response(),
 			NotADirectory => (StatusCode::CONFLICT, "Not A Directory").into_response(),
-			AlreadyExists(location) => (StatusCode::CONFLICT, [(header::LOCATION, location)], "Already Exists").into_response(),
+			AlreadyExists(location) => (StatusCode::CONFLICT, Header::<Location>(location), "Already Exists").into_response(),
 			DirectoryNotEmpty => (StatusCode::CONFLICT, "Directory Not Empty").into_response(),
 			Modified => StatusCode::PRECONDITION_FAILED.into_response(),
 			NotModified => StatusCode::NOT_MODIFIED.into_response(),

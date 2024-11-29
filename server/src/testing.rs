@@ -2,11 +2,9 @@
 
 use std::{io, pin::Pin, task::{Context, Poll}};
 
-use axum::http::{header, HeaderMap};
 use bytes::Bytes;
 use diesel::SqliteConnection;
 use futures::Stream;
-use fye_shared::NodeID;
 use tempfile::TempDir;
 
 use crate::{db, extractors::{DbConnection, Directories}};
@@ -25,31 +23,6 @@ impl TestDb {
 	pub fn conn(&mut self) -> DbConnection<'_> {
 		DbConnection::from_single(&mut self.conn)
 	}
-}
-
-#[derive(PartialEq, Eq, Debug)]
-pub enum NodeKind {
-	Directory,
-	File,
-}
-
-pub fn parse_location(headers: &HeaderMap, expected_kind: NodeKind) -> NodeID {
-	let location = headers.get(header::LOCATION).unwrap().to_str().unwrap();
-	
-	parse_location_str(location, expected_kind)
-}
-
-pub fn parse_location_str(location: &str, expected_kind: NodeKind) -> NodeID {
-	let (kind, id) = match (location.strip_prefix("/api/dir/"), location.strip_prefix("/api/file/")) {
-		(Some(id), None) => (NodeKind::Directory, id),
-		(None, Some(id)) => (NodeKind::File, id),
-		(Some(_), Some(_)) => unreachable!(),
-		(None, None) => panic!("invalid location"),
-	};
-	
-	assert_eq!(kind, expected_kind);
-	
-	id.parse().unwrap()
 }
 
 pub fn bytes_stream_from(chunks: &'static [&'static [u8]]) -> impl Stream<Item = Result<Bytes, io::Error>> {
