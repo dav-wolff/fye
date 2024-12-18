@@ -2,6 +2,8 @@ use super::*;
 
 mod upload_file;
 use upload_file::*;
+mod write_lock;
+use write_lock::*;
 
 fn get_file_info(conn: &mut SqliteConnection, id: NodeID) -> Result<db::File, Error> {
 	db::File::get(id)
