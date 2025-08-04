@@ -12,7 +12,7 @@ use axum::{body::Body, BoxError};
 #[cfg(test)]
 use futures::TryStream;
 
-use crate::{db, error::Error};
+use crate::{db, error::Error, routes::write_lock::FileWriteLock};
 
 mod headers;
 pub use headers::*;
@@ -23,6 +23,7 @@ type BoxedFuture<'a, O> = Pin<Box<dyn Future<Output = O> + Send + 'a>>;
 pub struct AppState {
 	db_pool: Pool<ConnectionManager>,
 	directories: Directories,
+	file_write_lock: FileWriteLock,
 }
 
 impl AppState {
@@ -30,6 +31,7 @@ impl AppState {
 		Self {
 			db_pool,
 			directories,
+			file_write_lock: Default::default(),
 		}
 	}
 }
@@ -49,6 +51,18 @@ impl FromRequestParts<AppState> for Directories {
 		'p: 'f,
 	{
 		future::ready(Ok(state.directories.clone())).boxed()
+	}
+}
+
+impl FromRequestParts<AppState> for FileWriteLock {
+	type Rejection = Infallible;
+	
+	fn from_request_parts<'p, 's, 'f>(_parts: &mut Parts, state: &'s AppState) -> BoxedFuture<'f, Result<Self, Self::Rejection>>
+	where
+		's: 'f,
+		'p: 'f,
+	{
+		future::ready(Ok(state.file_write_lock.clone())).boxed()
 	}
 }
 

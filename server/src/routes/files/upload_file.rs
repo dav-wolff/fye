@@ -12,7 +12,7 @@ impl UploadFile {
 	pub async fn new(path: PathBuf) -> Result<Self, io::Error> {
 		let file = OpenOptions::new()
 			.write(true)
-			.create_new(true)
+			.create(true)
 			.open(&path).await?;
 		
 		Ok(Self {
@@ -39,7 +39,7 @@ impl Drop for UploadFile {
 		
 		tokio::task::spawn_blocking(move || {
 			if let Err(err) = std::fs::remove_file(&path) {
-				println!("could not clean up file at {}: {err}", path.as_os_str().to_string_lossy());
+				eprintln!("could not clean up file at {}: {err}", path.as_os_str().to_string_lossy());
 			}
 		});
 	}

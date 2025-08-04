@@ -2,7 +2,7 @@ use super::*;
 
 mod upload_file;
 use upload_file::*;
-mod write_lock;
+pub mod write_lock;
 use write_lock::*;
 
 fn get_file_info(conn: &mut SqliteConnection, id: NodeID) -> Result<db::File, Error> {
@@ -61,11 +61,12 @@ pub async fn file_data(
 pub async fn write_file_data(
 	mut conn: DbConnection<'_>,
 	directories: Directories,
+	file_write_lock: FileWriteLock,
 	Path(id): Path<NodeID>,
 	Header(prev_hash): Header<IfMatch>,
 	body_stream: BodyStream
 ) -> Result<StatusCode, Error> {
-	// TODO: delete upload file in case of error
+	let _guard = file_write_lock.lock(id).await;
 	
 	let file_info = get_file_info(&mut conn, id)?;
 	
@@ -74,7 +75,7 @@ pub async fn write_file_data(
 	}
 	
 	let mut file = UploadFile::new(directories.uploads.join(id.0.to_string())).await
-		.map_err(|err| Error::internal(err, "could not open new file for upload"))?; // TODO: handle case of file already existing
+		.map_err(|err| Error::internal(err, "could not open new file for upload"))?;
 	
 	let mut hash_stream = HashStream::new(body_stream);
 	stream_to_file(&mut hash_stream, &mut file).await
